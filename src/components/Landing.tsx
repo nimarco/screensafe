@@ -58,7 +58,7 @@ export function Landing({ categories, onToggleCategory, onFile, onSample, loadin
           in <b>MP4 / WebM / MOV</b>
         </span>
         <span>
-          out <b>H.264 MP4</b>
+          out <b>H.264 MP4 / WebM</b>
         </span>
         <span>
           <b>0</b> network requests

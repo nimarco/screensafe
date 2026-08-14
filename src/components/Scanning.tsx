@@ -23,6 +23,11 @@ export function Scanning({ video, p, onCancel }: Props) {
   const pct = p && p.duration > 0 && !modelPhase ? Math.min(100, (p.t / p.duration) * 100) : 0;
   const skipRate = p && p.sampled > 0 ? Math.round((p.skipped / p.sampled) * 100) : 0;
   const readRate = p && elapsed > 0.4 ? p.analyzed / elapsed : 0;
+  const modelLabel = p?.note?.toLowerCase().includes('face')
+    ? 'Loading face model'
+    : p?.note?.toLowerCase().includes('ocr')
+      ? 'Loading OCR engine'
+      : 'Loading detection models';
 
   return (
     <div className="scanning">
@@ -47,7 +52,7 @@ export function Scanning({ video, p, onCancel }: Props) {
       )}
 
       <div className="run-head">
-        <h2>{modelPhase ? 'Loading OCR engine' : 'Scanning'}</h2>
+        <h2>{modelPhase ? modelLabel : 'Scanning'}</h2>
         <span className="run-pct">{modelPhase ? '—' : `${pct.toFixed(0)}%`}</span>
       </div>
 
@@ -57,8 +62,10 @@ export function Scanning({ video, p, onCancel }: Props) {
 
       <p className="run-note">
         {modelPhase
-          ? (p?.note ?? 'tesseract.wasm → worker pool')
-          : `reading frame text at ${fmtTimecode(p.t)} of ${fmtTimecode(p.duration)}`}
+          ? (p?.note ?? 'local detection models')
+          : p?.ocr === false
+            ? `checking faces and QR codes at ${fmtTimecode(p.t)} of ${fmtTimecode(p.duration)}`
+            : `reading frame text at ${fmtTimecode(p.t)} of ${fmtTimecode(p.duration)}`}
       </p>
 
       <div className="readout">
@@ -67,7 +74,7 @@ export function Scanning({ video, p, onCancel }: Props) {
           <b>{p?.sampled ?? 0}</b>
         </div>
         <div className="kv">
-          <span>Frames read by OCR</span>
+          <span>{p?.ocr === false ? 'Frames analyzed' : 'Frames read by OCR'}</span>
           <b>{p?.analyzed ?? 0}</b>
         </div>
         <div className="kv">

@@ -2,6 +2,7 @@ import { DETECTORS_BY_ID } from '../lib/detectors/catalog';
 import type { ScanStats } from '../lib/scan';
 import { CATEGORIES, type Finding, type Severity } from '../lib/types';
 import type { ExportProgress, ExportResult } from '../lib/video/exportVideo';
+import { MOSAIC_MAX_CELLS, MOSAIC_MIN_CELLS } from '../lib/video/redact';
 import { ArrowIcon, fmtBytes, fmtRange, fmtTimecode, SEV_COLOR, SEV_LABEL, Spinner } from './ui';
 
 interface Props {
@@ -17,7 +18,34 @@ interface Props {
   result: ExportResult | null;
   exportedFrames: number | null;
   onDownload: () => void;
+  mosaicCells: number;
+  onMosaicCells: (cells: number) => void;
 }
+
+/*
+ * Measured on a real face (tools/mosaic-probe.html), by re-running the face
+ * detector on the redacted pixels — a redaction that its own detector can still
+ * read is not a redaction:
+ *
+ *   50 blocks (the old fixed rule)  re-identified at 0.89
+ *   15 blocks                       re-identified at 0.81
+ *   13 blocks and below             no face found in the output
+ *    6 blocks                       no facial structure left to a human eye
+ *
+ * The top of the slider is therefore known-bad for faces and says so, rather
+ * than being quietly removed: it is legitimate for a recording whose findings
+ * are all text, where keeping the shape of what was covered is useful.
+ */
+const MOSAIC_STRENGTH_LABEL = (cells: number): string =>
+  cells <= 4
+    ? 'maximum'
+    : cells <= 6
+      ? 'faces unrecognisable'
+      : cells <= 8
+        ? 'strong'
+        : cells <= 13
+          ? 'weak — a face may still read'
+          : 'text only — a face stays recoverable';
 
 const HINTS: Record<string, string> = {
   face: 'A recognisable face.',
@@ -43,6 +71,8 @@ export function Findings({
   result,
   exportedFrames,
   onDownload,
+  mosaicCells,
+  onMosaicCells,
 }: Props) {
   const redacted = findings.filter((f) => f.redact);
   const counts = findings.reduce<Record<Severity, number>>(
@@ -190,8 +220,8 @@ export function Findings({
               <div className="kv">
                 <span>Container</span>
                 <b>
-                  {result.format.toUpperCase()} · {result.format === 'mp4' ? 'H.264' : 'VP9'}
-                  {result.hasAudio ? ' + AAC' : ' · no audio'}
+                  {result.format.toUpperCase()} · {result.videoCodec}
+                  {result.audioCodec ? ` + ${result.audioCodec}` : ' · no audio'}
                 </b>
               </div>
               <div className="kv">
@@ -218,7 +248,7 @@ export function Findings({
               </div>
             </div>
             <button type="button" className="primary" onClick={onDownload}>
-              Download MP4
+              Download {result.format.toUpperCase()}
             </button>
             <button type="button" className="btn block" onClick={onReset}>
               Scan another recording
@@ -238,8 +268,30 @@ export function Findings({
           </>
         ) : (
           <>
+            <label className="mosaic-control">
+              <span className="mosaic-head">
+                Redaction strength
+                <b className={mosaicCells >= 14 ? 'unsafe' : mosaicCells >= 9 ? 'weak' : undefined}>
+                  {MOSAIC_STRENGTH_LABEL(mosaicCells)}
+                </b>
+              </span>
+              <input
+                type="range"
+                min={MOSAIC_MIN_CELLS}
+                max={MOSAIC_MAX_CELLS}
+                step={1}
+                // Reversed, so dragging right destroys more: the slider reads
+                // as strength, while the value underneath is cells kept.
+                value={MOSAIC_MIN_CELLS + MOSAIC_MAX_CELLS - mosaicCells}
+                onChange={(e) => onMosaicCells(MOSAIC_MIN_CELLS + MOSAIC_MAX_CELLS - Number(e.target.value))}
+                aria-label="Redaction strength"
+              />
+              <span className="mosaic-note mono">
+                {mosaicCells} blocks across · applies to the preview and the export
+              </span>
+            </label>
             <button type="button" className="primary" onClick={onExport}>
-              Export MP4
+              Export video
             </button>
             <p className="foot-note mono">
               {redacted.length} of {findings.length} findings burned in · mosaic downsample, not a reversible blur

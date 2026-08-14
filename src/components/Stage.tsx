@@ -12,6 +12,8 @@ interface Props {
   seekToken: { t: number; n: number } | null;
   /** True while an export owns the video element. */
   frozen?: boolean;
+  /** Mosaic cells per region. The preview must use exactly what the export will. */
+  mosaicCells: number;
 }
 
 /** Pick a ruler interval that lands on a round number and leaves ≤9 labels. */
@@ -19,7 +21,7 @@ function tickStep(duration: number): number {
   return [1, 2, 5, 10, 15, 30, 60, 120, 300].find((s) => duration / s <= 9) ?? 600;
 }
 
-export function Stage({ video, findings, activeId, onSelect, seekToken, frozen = false }: Props) {
+export function Stage({ video, findings, activeId, onSelect, seekToken, frozen = false, mosaicCells }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const holderRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
@@ -33,6 +35,13 @@ export function Stage({ video, findings, activeId, onSelect, seekToken, frozen =
     if (!holder) return;
     holder.appendChild(video.el);
     video.el.muted = true;
+    // The scanner drives this same element and leaves it on the last sampled
+    // frame, a millisecond from the end. Adopting it there makes the first
+    // press of Play appear to do nothing: it really does play, for the 80ms of
+    // tail nobody can see, and only the second press rewinds — because by then
+    // `ended` is true and the browser restarts from zero on its own. Review
+    // should start at the beginning anyway.
+    video.el.currentTime = 0;
     return () => {
       video.el.pause();
       if (video.el.parentElement === holder) holder.removeChild(video.el);
@@ -72,7 +81,7 @@ export function Stage({ video, findings, activeId, onSelect, seekToken, frozen =
       if (el.readyState >= 2) {
         ctx.drawImage(el, 0, 0, video.width, video.height);
         const boxes = activeBoxes(findings, now, video.width, video.height);
-        paintRedactions(ctx, boxes, video.width, video.height);
+        paintRedactions(ctx, boxes, video.width, video.height, mosaicCells);
         const sel = findings.find((f) => f.id === activeId);
         if (sel) {
           const selBoxes = activeBoxes([{ ...sel, redact: true }], now, video.width, video.height);
@@ -86,7 +95,7 @@ export function Stage({ video, findings, activeId, onSelect, seekToken, frozen =
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [video, findings, activeId, frozen]);
+  }, [video, findings, activeId, frozen, mosaicCells]);
 
   const ticks = useMemo(() => {
     const step = tickStep(video.duration);
@@ -96,8 +105,16 @@ export function Stage({ video, findings, activeId, onSelect, seekToken, frozen =
   }, [video.duration]);
 
   const toggle = () => {
-    if (video.el.paused) void video.el.play();
-    else video.el.pause();
+    const el = video.el;
+    if (!el.paused) {
+      el.pause();
+      return;
+    }
+    // Pressing Play with the playhead already on the last frame — scrubbed
+    // there, or left there by a previous run — plays a few invisible
+    // milliseconds and stops. Treat it as "play it again from the top".
+    if (el.ended || el.currentTime >= video.duration - 0.15) el.currentTime = 0;
+    void el.play();
   };
 
   const scrub = (e: React.MouseEvent<HTMLDivElement>) => {

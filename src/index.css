@@ -1472,3 +1472,49 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Redaction strength. Sits directly above Export because it changes what the
+   export burns in, not just what the preview shows. */
+.mosaic-control {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.mosaic-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin-bottom: 6px;
+}
+
+.mosaic-head b {
+  font-weight: 550;
+  color: var(--ok);
+}
+
+.mosaic-head b.weak {
+  color: var(--warn, #ffa657);
+}
+
+/* Measured as recoverable, so it reads as a warning, not a preference. */
+.mosaic-head b.unsafe {
+  color: var(--critical);
+}
+
+.mosaic-control input[type='range'] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.mosaic-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  opacity: 0.75;
+}

@@ -131,6 +131,57 @@ function scratch(dest: Ctx2D, w: number, h: number): { canvas: CanvasImageSource
 }
 
 /**
+ * How many mosaic cells a redacted region may keep on its longer axis.
+ *
+ * This is the number that decides whether a redaction works, and it has to be
+ * a *count*, not a pixel size. The rule here used to be a block of about 12.7
+ * pixels, derived from text cap height — which quietly meant the number of
+ * cells grew with the region: a line of text kept 33x2 cells and was destroyed,
+ * while a 446x485 face kept 35x38 and stayed plainly recognisable in the
+ * export. Same code, opposite outcomes, because the strength was pinned to the
+ * block instead of to what survives it.
+ *
+ * Six cells across is past the point where a human can identify a face, and it
+ * is strictly stronger than the old rule for text, which was already verified
+ * unreadable by re-scanning the exported pixels.
+ */
+export const DEFAULT_MOSAIC_CELLS = 6;
+
+/**
+ * Range offered in the UI, weakest to strongest.
+ *
+ * The weak end is a deliberate stopping point, not the widest the maths allows:
+ * the old fixed-block rule left roughly 50 cells across a face and the face
+ * detector re-run on the redacted pixels found it again at 0.89 confidence,
+ * which is the failure this whole scale exists to keep out of reach. Below 3
+ * the mosaic stops telling a reviewer anything about what was covered.
+ */
+export const MOSAIC_MIN_CELLS = 3;
+export const MOSAIC_MAX_CELLS = 15;
+
+/**
+ * The mosaic grid for a region: how few pixels it is crushed down to before
+ * being blown back up. Exported so the suite can assert the bound holds for
+ * every region size — the old rule passed every test it had while leaving a
+ * face at 50x44 cells, because nothing ever checked what survived.
+ */
+export function mosaicGrid(
+  bw: number,
+  bh: number,
+  cells: number = DEFAULT_MOSAIC_CELLS,
+): { block: number; sw: number; sh: number } {
+  // Scale the cell to the region, so a big region is destroyed as thoroughly
+  // as a small one. The floor keeps tiny boxes from being pointlessly coarse.
+  const bounded = Math.min(MOSAIC_MAX_CELLS, Math.max(MOSAIC_MIN_CELLS, Math.round(cells)));
+  const block = Math.max(6, Math.max(bw, bh) / bounded);
+  return {
+    block,
+    sw: Math.max(1, Math.round(bw / block)),
+    sh: Math.max(1, Math.round(bh / block)),
+  };
+}
+
+/**
  * Destructive mosaic.
  *
  * We downsample the region to a handful of pixels and blow it back up with
@@ -138,7 +189,13 @@ function scratch(dest: Ctx2D, w: number, h: number): { canvas: CanvasImageSource
  * convolution and has been undone on real redactions before — averaging pixels
  * down to blocks throws the information away for good.
  */
-export function paintRedactions(ctx: Ctx2D, boxes: Box[], frameW: number, frameH: number): void {
+export function paintRedactions(
+  ctx: Ctx2D,
+  boxes: Box[],
+  frameW: number,
+  frameH: number,
+  cells: number = DEFAULT_MOSAIC_CELLS,
+): void {
   if (!boxes.length) return;
   ctx.save();
   for (const box of boxes) {
@@ -148,9 +205,7 @@ export function paintRedactions(ctx: Ctx2D, boxes: Box[], frameW: number, frameH
     const bh = Math.min(frameH - by, Math.ceil(box.h));
     if (bw < 2 || bh < 2) continue;
 
-    const block = Math.max(6, Math.min(bh, 28) / 2.2);
-    const sw = Math.max(1, Math.round(bw / block));
-    const sh = Math.max(1, Math.round(bh / block));
+    const { sw, sh } = mosaicGrid(bw, bh, cells);
 
     const { canvas: tmp, ctx: tctx } = scratch(ctx, sw, sh);
     tctx.imageSmoothingEnabled = true;

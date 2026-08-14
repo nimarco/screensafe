@@ -8,6 +8,7 @@ import { scanVideo, type ScanProgress, type ScanStats } from './lib/scan';
 import type { CategoryId, Finding } from './lib/types';
 import { exportRedacted, type ExportProgress, type ExportResult } from './lib/video/exportVideo';
 import { loadVideo, type LoadedVideo } from './lib/video/frames';
+import { DEFAULT_MOSAIC_CELLS } from './lib/video/redact';
 import { disposeFaceDetector } from './lib/vision/faces';
 
 type Phase = 'idle' | 'scanning' | 'review';
@@ -50,9 +51,21 @@ export default function App() {
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [exportedFrames, setExportedFrames] = useState<number | null>(null);
   const [loadingSample, setLoadingSample] = useState(false);
+  const [mosaicCells, setMosaicCells] = useState(DEFAULT_MOSAIC_CELLS);
   const abortRef = useRef<AbortController | null>(null);
+  const runSeq = useRef(0);
+  const videoRef = useRef<LoadedVideo | null>(null);
+  const resultUrlRef = useRef<string | null>(null);
   const framesRef = useRef(0);
   const seekSeq = useRef(0);
+
+  useEffect(() => {
+    videoRef.current = video;
+  }, [video]);
+
+  useEffect(() => {
+    resultUrlRef.current = resultUrl;
+  }, [resultUrl]);
 
   const toggleCategory = (id: CategoryId) =>
     setCategories((prev) => {
@@ -63,9 +76,15 @@ export default function App() {
     });
 
   const reset = useCallback(() => {
+    runSeq.current += 1;
     abortRef.current?.abort();
-    if (video) URL.revokeObjectURL(video.url);
-    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    abortRef.current = null;
+    const loaded = videoRef.current ?? video;
+    if (loaded) URL.revokeObjectURL(loaded.url);
+    const oldResultUrl = resultUrlRef.current ?? resultUrl;
+    if (oldResultUrl) URL.revokeObjectURL(oldResultUrl);
+    videoRef.current = null;
+    resultUrlRef.current = null;
     disposeFaceDetector();
     setPhase('idle');
     setVideo(null);
@@ -82,18 +101,37 @@ export default function App() {
 
   const start = useCallback(
     async (file: File) => {
-      setError(null);
       if (categories.size === 0) {
         setError('Turn on at least one category in Scan scope before scanning.');
         return;
       }
+      const runId = ++runSeq.current;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      const previousVideo = videoRef.current;
+      if (previousVideo) URL.revokeObjectURL(previousVideo.url);
+      const previousResultUrl = resultUrlRef.current;
+      if (previousResultUrl) URL.revokeObjectURL(previousResultUrl);
+      videoRef.current = null;
+      resultUrlRef.current = null;
+      setError(null);
+      setVideo(null);
+      setResult(null);
+      setResultUrl(null);
+      setExportedFrames(null);
       let loaded: LoadedVideo;
       try {
         loaded = await loadVideo(file);
       } catch (err) {
+        if (runSeq.current !== runId) return;
         setError(err instanceof Error ? err.message : 'That file could not be opened.');
         return;
       }
+      if (runSeq.current !== runId) {
+        URL.revokeObjectURL(loaded.url);
+        return;
+      }
+      videoRef.current = loaded;
       setVideo(loaded);
       setPhase('scanning');
       setProgress(null);
@@ -105,20 +143,31 @@ export default function App() {
           categories,
           sampleFps: 2,
           signal: ctrl.signal,
-          onProgress: setProgress,
+          onProgress: (p) => {
+            if (runSeq.current === runId) setProgress(p);
+          },
         });
+        if (runSeq.current !== runId || ctrl.signal.aborted) return;
         setFindings(res.findings);
         setStats(res.stats);
         setActiveId(res.findings[0]?.id ?? null);
         setPhase('review');
       } catch (err) {
+        if (runSeq.current !== runId) return;
+        if (videoRef.current === loaded) {
+          URL.revokeObjectURL(loaded.url);
+          videoRef.current = null;
+        }
         if ((err as DOMException)?.name === 'AbortError') {
           setPhase('idle');
           setVideo(null);
           return;
         }
         setError(err instanceof Error ? err.message : 'The scan failed.');
+        setVideo(null);
         setPhase('idle');
+      } finally {
+        if (abortRef.current === ctrl) abortRef.current = null;
       }
     },
     [categories],
@@ -152,7 +201,15 @@ export default function App() {
 
   const runExport = useCallback(async () => {
     if (!video) return;
+    const runId = runSeq.current;
     setError(null);
+    abortRef.current?.abort();
+    if (resultUrlRef.current) {
+      URL.revokeObjectURL(resultUrlRef.current);
+      resultUrlRef.current = null;
+      setResultUrl(null);
+    }
+    setResult(null);
     framesRef.current = 0;
     setExporting({ phase: 'preparing', done: 0, total: 1 });
     const ctrl = new AbortController();
@@ -161,25 +218,30 @@ export default function App() {
       video.el.pause();
       const res = await exportRedacted(video, findings, {
         fps: 30,
+        mosaicCells,
         signal: ctrl.signal,
         onProgress: (p) => {
           // The final `total` is the real encoded frame count; keep it so the
           // result can report measured throughput rather than a guess.
           if (p.phase === 'video' || p.phase === 'finalizing') framesRef.current = p.total;
-          setExporting(p);
+          if (runSeq.current === runId) setExporting(p);
         },
       });
+      if (runSeq.current !== runId || ctrl.signal.aborted) return;
       setResult(res);
       setExportedFrames(framesRef.current || null);
-      setResultUrl(URL.createObjectURL(res.blob));
+      const url = URL.createObjectURL(res.blob);
+      resultUrlRef.current = url;
+      setResultUrl(url);
     } catch (err) {
-      if ((err as DOMException)?.name !== 'AbortError') {
+      if (runSeq.current === runId && (err as DOMException)?.name !== 'AbortError') {
         setError(err instanceof Error ? err.message : 'Export failed.');
       }
     } finally {
-      setExporting(null);
+      if (abortRef.current === ctrl) abortRef.current = null;
+      if (runSeq.current === runId) setExporting(null);
     }
-  }, [video, findings]);
+  }, [video, findings, mosaicCells]);
 
   const download = () => {
     if (!result || !resultUrl) return;
@@ -189,7 +251,17 @@ export default function App() {
     a.click();
   };
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(
+    () => () => {
+      runSeq.current += 1;
+      abortRef.current?.abort();
+      const loaded = videoRef.current;
+      if (loaded) URL.revokeObjectURL(loaded.url);
+      if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
+      disposeFaceDetector();
+    },
+    [],
+  );
 
   const stepIndex = result ? 2 : phase === 'review' ? 1 : 0;
 
@@ -278,6 +350,7 @@ export default function App() {
               onSelect={select}
               seekToken={seekToken}
               frozen={!!exporting}
+              mosaicCells={mosaicCells}
             />
           )}
           <Findings
@@ -293,6 +366,8 @@ export default function App() {
             result={result}
             exportedFrames={exportedFrames}
             onDownload={download}
+            mosaicCells={mosaicCells}
+            onMosaicCells={setMosaicCells}
           />
         </main>
       )}

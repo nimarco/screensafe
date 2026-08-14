@@ -13,6 +13,8 @@ export interface ExportProgress {
 
 export interface ExportOptions {
   fps?: number;
+  /** Mosaic cells per region on its longer axis. Fewer destroys more. */
+  mosaicCells?: number;
   maxWidth?: number;
   onProgress?: (p: ExportProgress) => void;
   signal?: AbortSignal;
@@ -22,6 +24,9 @@ export interface ExportResult {
   blob: Blob;
   filename: string;
   format: 'mp4' | 'webm';
+  mimeType: string;
+  videoCodec: 'H.264' | 'VP9' | 'VP8' | 'unknown';
+  audioCodec: 'AAC' | 'Opus' | null;
   width: number;
   height: number;
   fps: number;
@@ -62,16 +67,19 @@ interface DecodedAudio {
 }
 
 async function decodeAudio(file: File): Promise<DecodedAudio | null> {
+  let ctx: AudioContext | null = null;
   try {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const ctx = new AC();
+    if (!AC) return null;
+    ctx = new AC();
     const bytes = await file.arrayBuffer();
     const buffer = await ctx.decodeAudioData(bytes);
-    await ctx.close();
     if (!buffer || buffer.length === 0 || buffer.numberOfChannels === 0) return null;
     return { buffer };
   } catch {
     return null; // silent video, or a codec the browser won't decode
+  } finally {
+    await ctx?.close().catch(() => {});
   }
 }
 
@@ -287,7 +295,7 @@ export async function exportRedacted(
     const boxes = activeBoxes(findings, t, video.width, video.height).map((b) =>
       scale === 1 ? b : { x: b.x * scale, y: b.y * scale, w: b.w * scale, h: b.h * scale },
     );
-    paintRedactions(canvas.ctx, boxes, width, height);
+    paintRedactions(canvas.ctx, boxes, width, height, opts.mosaicCells);
   };
 
   /** Returns false once the encoder is no longer accepting frames. */
@@ -349,55 +357,89 @@ export async function exportRedacted(
     };
 
     assertExportVisible();
-    await seekTo(el, 0, { requireFrameCallback: true });
+    await seekTo(el, 0, { requireFrameCallback: true, signal });
     el.playbackRate = 1;
 
     const streamed = await new Promise<{ complete: boolean; resumeT: number }>((resolve, reject) => {
       let lastT = -1;
       let lastFrameAt = performance.now();
       let watchdog = 0;
+      let streamStopped = false;
       const cleanup = () => {
+        streamStopped = true;
         window.clearInterval(watchdog);
         el.removeEventListener('ended', onEnded);
         document.removeEventListener('visibilitychange', onVisibilityChange);
         el.pause();
       };
       const onVisibilityChange = () => {
+        if (streamStopped) return;
         if (document.visibilityState !== 'visible') {
           cleanup();
           reject(new Error('Export stopped because the document became hidden. Keep this tab visible and try again.'));
         }
       };
       const onEnded = () => {
+        if (streamStopped) return;
         cleanup();
         resolve({ complete: true, resumeT: lastT });
       };
-      const step = (_now: number, meta: { mediaTime: number }) => {
-        if (signal?.aborted) {
-          cleanup();
-          reject(new DOMException('Export cancelled', 'AbortError'));
-          return;
-        }
-        lastFrameAt = performance.now();
-        const t = meta.mediaTime;
-        // rVFC can repeat a frame across callbacks; never emit a timestamp twice.
-        if (t > lastT) {
-          composite(t);
-          if (!emit(t, Math.round(1e6 / fps))) {
-            // The encoder is gone. Stop pulling frames and let the check after
-            // this block turn it into a failed export rather than a short file.
+      const step = async (_now: number, meta: { mediaTime: number }) => {
+        if (streamStopped) return;
+        try {
+          if (signal?.aborted) throw new DOMException('Export cancelled', 'AbortError');
+          lastFrameAt = performance.now();
+          const t = meta.mediaTime;
+          // rVFC can repeat a frame across callbacks; never emit a timestamp twice.
+          if (t > lastT) {
+            composite(t);
+            if (!emit(t, Math.round(1e6 / fps))) {
+              // The encoder is gone. Stop pulling frames and let the check after
+              // this block turn it into a failed export rather than a short file.
+              cleanup();
+              resolve({ complete: true, resumeT: lastT });
+              return;
+            }
+            lastT = t;
+
+            // Playback can decode faster than H.264 can encode on a loaded
+            // machine. Pause the source while the encoder drains instead of
+            // allowing its queue to grow until VideoEncoder errors.
+            if (encoder.encodeQueueSize > 8) {
+              el.pause();
+              const drainStarted = performance.now();
+              while (encoder.encodeQueueSize > 8) {
+                if (streamStopped) return;
+                if (signal?.aborted) throw new DOMException('Export cancelled', 'AbortError');
+                if (writeError !== null) throw writeError;
+                if (performance.now() - drainStarted > 10_000) {
+                  throw new Error('The video encoder could not keep up with the source frames.');
+                }
+                await yieldToLoop();
+                lastFrameAt = performance.now();
+              }
+              if (streamStopped) return;
+              if (!el.ended) await el.play();
+            }
+          }
+          if (streamStopped) return;
+          if (el.ended) {
+            // The source is finished and the final emitted frame is already
+            // queued. Stop pulling frames and let the checks after this block
+            // decide whether the export is complete.
             cleanup();
             resolve({ complete: true, resumeT: lastT });
             return;
           }
-          lastT = t;
-        }
-        if (el.ended) {
+          try {
+            el.requestVideoFrameCallback(step);
+          } catch (err) {
+            throw err;
+          }
+        } catch (err) {
           cleanup();
-          resolve({ complete: true, resumeT: lastT });
-          return;
+          reject(err);
         }
-        el.requestVideoFrameCallback(step);
       };
       // A hidden tab presents no frames at all — rVFC stops firing and playback
       // itself stalls. That happens on first start (headless, backgrounded) and
@@ -418,6 +460,7 @@ export async function exportRedacted(
       el.addEventListener('ended', onEnded);
       el.requestVideoFrameCallback(step);
       el.play().catch((err) => {
+        if (streamStopped) return;
         cleanup();
         reject(err);
       });
@@ -434,7 +477,7 @@ export async function exportRedacted(
         }
         assertExportVisible();
         const t = i / fps;
-        await seekTo(video.el, Math.min(t, video.duration - 0.001), { requireFrameCallback: true });
+        await seekTo(video.el, Math.min(t, video.duration - 0.001), { requireFrameCallback: true, signal });
         composite(t);
         if (!emit(t, Math.round(1e6 / fps))) break;
         while (encoder.encodeQueueSize > 8) await yieldToLoop();
@@ -448,7 +491,7 @@ export async function exportRedacted(
       }
       assertExportVisible();
       const t = i / fps;
-      await seekTo(video.el, Math.min(t, video.duration - 0.001), { requireFrameCallback: true });
+      await seekTo(video.el, Math.min(t, video.duration - 0.001), { requireFrameCallback: true, signal });
       composite(t);
       if (!emit(t, Math.round(1e6 / fps))) break;
       while (encoder.encodeQueueSize > 8) await yieldToLoop();
@@ -474,9 +517,15 @@ export async function exportRedacted(
     } catch {
       /* the error path may have closed it already */
     }
+    const detail =
+      writeError instanceof Error && writeError.message
+        ? ` Cause: ${writeError.message}`
+        : writeError !== null
+          ? ` Cause: ${String(writeError)}`
+          : '';
     throw new Error(
       'Export failed before the file was complete, so nothing was saved. Some frames could not be ' +
-        'encoded, and a partial file could have left secrets visible.',
+        `encoded, and a partial file could have left secrets visible.${detail}`,
     );
   }
 
@@ -503,6 +552,9 @@ export async function exportRedacted(
     blob,
     filename: `${safeName(video.file.name)}.mp4`,
     format: 'mp4',
+    mimeType: 'video/mp4',
+    videoCodec: 'H.264',
+    audioCodec: withAudio ? 'AAC' : null,
     width,
     height,
     fps: video.duration > 0 ? Math.round(emitted / video.duration) : fps,
@@ -525,8 +577,10 @@ async function exportViaMediaRecorder(
   assertExportVisible();
   const started = performance.now();
   const fps = opts.fps ?? 30;
-  const width = evenize(video.width);
-  const height = evenize(video.height);
+  const maxWidth = opts.maxWidth ?? Infinity;
+  const scale = Math.min(1, maxWidth / video.width);
+  const width = evenize(video.width * scale);
+  const height = evenize(video.height * scale);
   const report = (p: ExportProgress) => opts.onProgress?.(p);
   const exportEl = video.el as HTMLVideoElement & {
     requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime: number }) => void) => number;
@@ -535,129 +589,201 @@ async function exportViaMediaRecorder(
   if (typeof exportEl.requestVideoFrameCallback !== 'function') {
     throw new Error('Frame-accurate export is unavailable because this browser cannot confirm video frames.');
   }
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('This browser cannot export a redacted video because MediaRecorder is unavailable.');
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d', { alpha: false })!;
 
+  if (typeof canvas.captureStream !== 'function') {
+    throw new Error('This browser cannot export a redacted video because canvas capture is unavailable.');
+  }
   const stream = canvas.captureStream(fps);
   let audioCtx: AudioContext | null = null;
   let hasAudio = false;
-  try {
-    audioCtx = new AudioContext();
-    const src = audioCtx.createMediaElementSource(video.el);
-    const dest = audioCtx.createMediaStreamDestination();
-    src.connect(dest);
-    for (const track of dest.stream.getAudioTracks()) {
-      stream.addTrack(track);
-      hasAudio = true;
-    }
-  } catch {
-    hasAudio = false;
-  }
-
-  const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) =>
-    MediaRecorder.isTypeSupported(m),
-  );
-  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 });
-  const chunks: Blob[] = [];
-  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-
-  const finished = new Promise<void>((resolve) => {
-    recorder.onstop = () => resolve();
-  });
-
+  let recorder: MediaRecorder | null = null;
   let recorderStarted = false;
-  let frameCallback: number | null = null;
-  let drawn = false;
-  let visibilityError: Error | null = null;
-  let resolveDrawing: (() => void) | null = null;
-  let rejectDrawing: ((err: unknown) => void) | null = null;
-  const onVisibilityChange = () => {
-    if (document.visibilityState !== 'visible') {
-      visibilityError = new Error('Export stopped because the document became hidden. Keep this tab visible and try again.');
-      video.el.pause();
-      rejectDrawing?.(visibilityError);
-      if (recorderStarted && recorder.state !== 'inactive') recorder.stop();
-    }
-  };
+  let finished: Promise<void> = Promise.resolve();
 
-  document.addEventListener('visibilitychange', onVisibilityChange);
-  const onEnded = () => resolveDrawing?.();
-  exportEl.addEventListener('ended', onEnded);
   try {
-    // Confirm the starting frame before the recorder begins consuming the
-    // canvas. The same rule applies to the WebCodecs path above.
-    video.el.muted = true;
-    await seekTo(exportEl, 0, { requireFrameCallback: true });
-    video.el.muted = !hasAudio;
-    recorder.start();
-    recorderStarted = true;
+    try {
+      const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (AC) {
+        audioCtx = new AC();
+        const src = audioCtx.createMediaElementSource(video.el);
+        const dest = audioCtx.createMediaStreamDestination();
+        src.connect(dest);
+        for (const track of dest.stream.getAudioTracks()) {
+          stream.addTrack(track);
+          hasAudio = true;
+        }
+      }
+    } catch {
+      hasAudio = false;
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      resolveDrawing = resolve;
-      rejectDrawing = reject;
-      const draw = (_now: number, meta: { mediaTime: number }) => {
-        frameCallback = null;
-        if (visibilityError) {
-          reject(visibilityError);
-          return;
-        }
-        const t = meta.mediaTime;
-        ctx.drawImage(video.el, 0, 0, width, height);
-        drawn = true;
-        paintRedactions(ctx, activeBoxes(findings, t, video.width, video.height), width, height);
-        report({
-          phase: 'video',
-          done: Math.round(t * fps),
-          total: Math.round(video.duration * fps),
-          note: 'Recording redacted playback',
-        });
-        if (video.el.ended) {
-          resolve();
-          return;
-        }
+    const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) =>
+      MediaRecorder.isTypeSupported(m),
+    );
+    recorder = mime
+      ? new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 })
+      : new MediaRecorder(stream, { videoBitsPerSecond: 8e6 });
+    const actualMime = recorder.mimeType || mime || 'video/webm';
+    const videoCodec: ExportResult['videoCodec'] = actualMime.toLowerCase().includes('vp9')
+      ? 'VP9'
+      : actualMime.toLowerCase().includes('vp8')
+        ? 'VP8'
+        : 'unknown';
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+
+    let recorderError: Error | null = null;
+
+    let frameCallback: number | null = null;
+    let drawn = false;
+    let terminalError: Error | null = null;
+    let resolveDrawing: (() => void) | null = null;
+    let rejectDrawing: ((err: unknown) => void) | null = null;
+    const abortError = () => new DOMException('Export cancelled', 'AbortError');
+    const stopRecorder = () => {
+      if (recorderStarted && recorder && recorder.state !== 'inactive') recorder.stop();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        terminalError = new Error('Export stopped because the document became hidden. Keep this tab visible and try again.');
+        video.el.pause();
+        rejectDrawing?.(terminalError);
+        stopRecorder();
+      }
+    };
+    const onAbort = () => {
+      terminalError = abortError();
+      video.el.pause();
+      rejectDrawing?.(terminalError);
+      stopRecorder();
+    };
+    finished = new Promise<void>((resolve, reject) => {
+      recorder!.onstop = () => resolve();
+      recorder!.onerror = (event) => {
+        recorderError = event.error instanceof Error ? event.error : new Error('MediaRecorder failed during export.');
+        terminalError = recorderError;
+        rejectDrawing?.(recorderError);
+        stopRecorder();
+        reject(recorderError);
+      };
+    });
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    const onEnded = () => resolveDrawing?.();
+    exportEl.addEventListener('ended', onEnded);
+    try {
+      if (opts.signal?.aborted) throw abortError();
+      // Confirm the starting frame before the recorder begins consuming the
+      // canvas. The same rule applies to the WebCodecs path above.
+      video.el.muted = true;
+      await seekTo(exportEl, 0, { requireFrameCallback: true, signal: opts.signal });
+      if (opts.signal?.aborted) throw abortError();
+      video.el.muted = !hasAudio;
+      recorder.start();
+      recorderStarted = true;
+
+      await new Promise<void>((resolve, reject) => {
+        resolveDrawing = resolve;
+        rejectDrawing = reject;
+        const draw = (_now: number, meta: { mediaTime: number }) => {
+          frameCallback = null;
+          if (terminalError) {
+            reject(terminalError);
+            return;
+          }
+          if (opts.signal?.aborted) {
+            const err = abortError();
+            terminalError = err;
+            reject(err);
+            stopRecorder();
+            return;
+          }
+          const t = meta.mediaTime;
+          ctx.drawImage(video.el, 0, 0, width, height);
+          drawn = true;
+          const boxes = activeBoxes(findings, t, video.width, video.height).map((b) =>
+            scale === 1 ? b : { x: b.x * scale, y: b.y * scale, w: b.w * scale, h: b.h * scale },
+          );
+          paintRedactions(ctx, boxes, width, height, opts.mosaicCells);
+          report({
+            phase: 'video',
+            done: Math.round(t * fps),
+            total: Math.round(video.duration * fps),
+            note: 'Recording redacted playback',
+          });
+          if (video.el.ended) {
+            resolve();
+            return;
+          }
+          try {
+            frameCallback = exportEl.requestVideoFrameCallback!(draw);
+          } catch (err) {
+            reject(err);
+          }
+        };
         try {
           frameCallback = exportEl.requestVideoFrameCallback!(draw);
+          void video.el.play().catch(reject);
         } catch (err) {
           reject(err);
         }
-      };
-      try {
-        frameCallback = exportEl.requestVideoFrameCallback!(draw);
-        void video.el.play().catch(reject);
-      } catch (err) {
-        reject(err);
+      });
+      if (terminalError) throw terminalError;
+      if (!drawn) throw new Error('Export failed before a video frame was presented, so nothing was saved.');
+    } finally {
+      resolveDrawing = null;
+      rejectDrawing = null;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      opts.signal?.removeEventListener('abort', onAbort);
+      exportEl.removeEventListener('ended', onEnded);
+      if (frameCallback !== null && exportEl.cancelVideoFrameCallback) {
+        exportEl.cancelVideoFrameCallback(frameCallback);
       }
-    });
-    if (visibilityError) throw visibilityError;
-    if (!drawn) throw new Error('Export failed before a video frame was presented, so nothing was saved.');
-  } finally {
-    resolveDrawing = null;
-    rejectDrawing = null;
-    document.removeEventListener('visibilitychange', onVisibilityChange);
-    exportEl.removeEventListener('ended', onEnded);
-    if (frameCallback !== null && exportEl.cancelVideoFrameCallback) {
-      exportEl.cancelVideoFrameCallback(frameCallback);
+      frameCallback = null;
+      video.el.pause();
+      stopRecorder();
+      if (recorderStarted) {
+        await Promise.race([
+          finished,
+          new Promise<void>((_, reject) =>
+            window.setTimeout(() => reject(new Error('MediaRecorder did not finish closing the export.')), 5000),
+          ),
+        ]).catch((err) => {
+          if (!terminalError && !opts.signal?.aborted) {
+            terminalError = recorderError ?? (err instanceof Error ? err : new Error(String(err)));
+          }
+        });
+      }
     }
-    frameCallback = null;
-    if (recorderStarted && recorder.state !== 'inactive') recorder.stop();
-    if (recorderStarted) await finished;
+
+    if (terminalError) throw terminalError;
+    const blob = new Blob(chunks, { type: actualMime });
+    report({ phase: 'done', done: 1, total: 1 });
+
+    return {
+      blob,
+      filename: `${safeName(video.file.name)}.webm`,
+      format: 'webm',
+      mimeType: actualMime,
+      videoCodec,
+      audioCodec: hasAudio ? 'Opus' : null,
+      width,
+      height,
+      fps,
+      hasAudio,
+      elapsedMs: performance.now() - started,
+    };
+  } finally {
     await audioCtx?.close().catch(() => {});
+    for (const track of stream.getTracks()) track.stop();
   }
-
-  const blob = new Blob(chunks, { type: mime ?? 'video/webm' });
-  report({ phase: 'done', done: 1, total: 1 });
-
-  return {
-    blob,
-    filename: `${safeName(video.file.name)}.webm`,
-    format: 'webm',
-    width,
-    height,
-    fps,
-    hasAudio,
-    elapsedMs: performance.now() - started,
-  };
 }

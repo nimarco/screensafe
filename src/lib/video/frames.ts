@@ -19,6 +19,8 @@ export interface SeekOptions {
   requireFrameCallback?: boolean;
   /** Maximum time to wait for a matching presented frame. */
   frameTimeoutMs?: number;
+  /** Cancel a pending seek when the owning scan/export is cancelled. */
+  signal?: AbortSignal;
 }
 
 // A sought timestamp may fall between source frames, or a source may begin a
@@ -30,15 +32,48 @@ const SEEK_FRAME_TOLERANCE_S = 0.05;
 /** Some containers (notably MediaRecorder WebM) report Infinity until seeked. */
 async function resolveDuration(el: HTMLVideoElement): Promise<number> {
   if (Number.isFinite(el.duration) && el.duration > 0) return el.duration;
-  return new Promise<number>((resolve) => {
-    const onSeeked = () => {
+  return new Promise<number>((resolve, reject) => {
+    let settled = false;
+    let guard = 0;
+    const cleanup = () => {
       el.removeEventListener('seeked', onSeeked);
+      el.removeEventListener('error', onError);
+      window.clearTimeout(guard);
+    };
+    const fail = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const onSeeked = () => {
       const d = Number.isFinite(el.duration) ? el.duration : el.currentTime;
-      el.currentTime = 0;
+      if (!Number.isFinite(d) || d <= 0) {
+        fail(new Error('This file has no usable duration.'));
+        return;
+      }
+      settled = true;
+      cleanup();
+      try {
+        el.currentTime = 0;
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       resolve(d);
     };
+    const onError = () => fail(new Error("This file couldn't be decoded while reading its duration."));
     el.addEventListener('seeked', onSeeked);
-    el.currentTime = 1e6;
+    el.addEventListener('error', onError);
+    guard = window.setTimeout(
+      () => fail(new Error('The video duration could not be determined. Try re-encoding the file and try again.')),
+      5000,
+    );
+    try {
+      el.currentTime = 1e6;
+    } catch (err) {
+      fail(err);
+    }
   });
 }
 
@@ -62,35 +97,45 @@ export async function loadVideo(file: File): Promise<LoadedVideo> {
   el.playsInline = true;
   el.src = url;
 
-  await new Promise<void>((resolve, reject) => {
-    const onMeta = () => {
-      el.removeEventListener('loadedmetadata', onMeta);
-      el.removeEventListener('error', onErr);
-      resolve();
-    };
-    const onErr = () => {
-      el.removeEventListener('loadedmetadata', onMeta);
-      el.removeEventListener('error', onErr);
-      reject(new Error("This file couldn't be decoded. Try an MP4, WebM or MOV."));
-    };
-    el.addEventListener('loadedmetadata', onMeta);
-    el.addEventListener('error', onErr);
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onMeta = () => {
+        el.removeEventListener('loadedmetadata', onMeta);
+        el.removeEventListener('error', onErr);
+        resolve();
+      };
+      const onErr = () => {
+        el.removeEventListener('loadedmetadata', onMeta);
+        el.removeEventListener('error', onErr);
+        reject(new Error("This file couldn't be decoded. Try an MP4, WebM or MOV."));
+      };
+      el.addEventListener('loadedmetadata', onMeta);
+      el.addEventListener('error', onErr);
+    });
 
-  const duration = await resolveDuration(el);
-  if (!el.videoWidth || !el.videoHeight) {
-    throw new Error('This file has no video track.');
+    const duration = await resolveDuration(el);
+    if (!el.videoWidth || !el.videoHeight) {
+      throw new Error('This file has no video track.');
+    }
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error('This file has no usable duration.');
+    }
+
+    return {
+      el,
+      url,
+      width: el.videoWidth,
+      height: el.videoHeight,
+      duration,
+      hasAudio: probeAudio(el),
+      file,
+    };
+  } catch (err) {
+    // The caller only receives a LoadedVideo after this point, so it cannot
+    // otherwise know which object URL must be released on a failed load.
+    URL.revokeObjectURL(url);
+    throw err;
   }
-
-  return {
-    el,
-    url,
-    width: el.videoWidth,
-    height: el.videoHeight,
-    duration,
-    hasAudio: probeAudio(el),
-    file,
-  };
 }
 
 /**
@@ -103,6 +148,7 @@ export async function loadVideo(file: File): Promise<LoadedVideo> {
 export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}): Promise<void> {
   const target = Math.max(0, t);
   const requireFrameCallback = opts.requireFrameCallback === true;
+  const { signal } = opts;
   const anyEl = el as HTMLVideoElement & {
     requestVideoFrameCallback?: (
       cb: (now: number, metadata: { mediaTime?: number }) => void,
@@ -117,6 +163,9 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
   if (requireFrameCallback && document.visibilityState !== 'visible') {
     return Promise.reject(new Error('Export stopped because the document is hidden. Keep this tab visible and try again.'));
   }
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('Export cancelled', 'AbortError'));
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -130,6 +179,7 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
     const cleanup = () => {
       el.removeEventListener('seeked', onSeeked);
       if (requireFrameCallback) document.removeEventListener('visibilitychange', onVisibilityChange);
+      signal?.removeEventListener('abort', onAbort);
       window.clearTimeout(seekGuard);
       window.clearTimeout(frameGuard);
       if (frameCallback !== null && anyEl.cancelVideoFrameCallback) {
@@ -158,6 +208,7 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
         fail(new Error('Export stopped because the document became hidden. Keep this tab visible and try again.'));
       }
     };
+    const onAbort = () => fail(new DOMException('Export cancelled', 'AbortError'));
 
     const waitForPresentedFrame = () => {
       if (settled) return;
@@ -166,7 +217,12 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
       // position, but under decoder load the compositor can still be showing a
       // previously decoded frame. A visible rVFC callback is the point at
       // which the browser has actually presented a frame we can draw.
-      if (!hasFrameCallback) {
+      // Scanning deliberately keeps the old short hidden/detached fallback:
+      // its element is not mounted during the scan, so waiting 1.5 seconds for
+      // a presentation callback would turn 2fps sampling into a minute-long
+      // operation. Only strict export seeks require the callback.
+      const useFrameCallback = hasFrameCallback && (requireFrameCallback || document.visibilityState === 'visible');
+      if (!useFrameCallback) {
         if (requireFrameCallback) {
           fail(new Error('Frame-accurate export is unavailable because no presented-frame callback fired.'));
         } else {
@@ -180,7 +236,7 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
         return;
       }
 
-      const timeout = opts.frameTimeoutMs ?? 1500;
+      const timeout = requireFrameCallback ? (opts.frameTimeoutMs ?? 1500) : 120;
       frameGuard = window.setTimeout(() => {
         if (requireFrameCallback) {
           fail(new Error(`The decoder did not present the requested frame at ${target.toFixed(3)}s.`));
@@ -239,6 +295,7 @@ export function seekTo(el: HTMLVideoElement, t: number, opts: SeekOptions = {}):
 
     el.addEventListener('seeked', onSeeked);
     if (requireFrameCallback) document.addEventListener('visibilitychange', onVisibilityChange);
+    signal?.addEventListener('abort', onAbort, { once: true });
     // Guard against browsers that swallow `seeked` at the very end of a file.
     seekGuard = window.setTimeout(markSeeked, 1500);
 

@@ -17,7 +17,7 @@ const STAGES: Array<[string, ReactNode]> = [
   ],
   ['Track', <>Merge repeat hits across frames into one time range with a dilated bounding box.</>],
   ['Review', <>Every finding blurred by default; you allow items back through one at a time.</>],
-  ['Export', <>Mosaic downsample burned into the pixels, re-encoded with WebCodecs and muxed to MP4.</>],
+  ['Export', <>Mosaic downsample burned into the pixels, then re-encoded locally as H.264 MP4 or a WebM fallback.</>],
 ];
 
 export function Pipeline() {
