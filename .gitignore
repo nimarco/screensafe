@@ -1,0 +1,8 @@
+node_modules
+dist
+.DS_Store
+*.log
+
+# Verification artifacts written by tools/ during local testing.
+public/sample/export-check.mp4
+public/sample/verified-export.mp4
