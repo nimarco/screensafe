@@ -7,7 +7,7 @@ redacted video.
 
 Everything runs in the browser. The video is never uploaded.
 
-**Author:** Marco Nunes · [@nimarco](https://github.com/nimarco) · solo project
+**Author:** Marco Ni · [@nimarco](https://github.com/nimarco) · solo project
 
 ## Quick start
 
