@@ -7,6 +7,8 @@ redacted video.
 
 Everything runs in the browser. The video is never uploaded.
 
+**Author:** Marco Nunes · [@nimarco](https://github.com/nimarco) · solo project
+
 ## Quick start
 
 ```bash
@@ -16,7 +18,20 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173) and click **Load sample**.
 
-## The submission
+## Why it scores against the rubric
+
+| Judging lens | What the judge can verify |
+| --- | --- |
+| **Functionality · 30%** | Load a real video, find 13 grouped exposures, review them, export a playable MP4, and rescan the export to prove the redactions held. |
+| **Creativity · 20%** | A privacy linter built for the creator workflow: it treats a moving timeline of UI text as something to lint, not something a creator must scrub manually. |
+| **Technical execution · 20%** | Change-gated sampling, parallel OCR, OCR repair, face tiling, QR validation, temporal tracking, masked review, and destructive pixel-level export—all running locally. |
+| **Real-world usefulness · 30%** | It catches the exact leaks creators publish by accident—keys, tokens, emails, phones, cards, database URLs, faces, and QR codes—before the upload happens. |
+
+**Live-output bonus:** the challenge rewards projects that run in front of the
+judge and produce a real result. ScreenSafe's demo path ends with a playable,
+downloadable, rescanned redacted video—not a mockup or a pre-recorded claim.
+
+## The product
 
 ScreenSafe automates a publishing workflow that creators currently handle by
 scrubbing through a timeline manually:
@@ -48,6 +63,10 @@ For a deeper browser check, open
 [tools/verify-e2e.html](tools/verify-e2e.html) while the dev server is running.
 It scans, exports, decodes the output, and rescans it to confirm that only
 explicitly allowed content remains.
+
+For the optional 2–4 minute demo video, record this same sequence live: load
+the sample, show the grouped findings, allow the safe email, keep the sensitive
+findings covered, export, scrub the resulting MP4, and run the rescan proof.
 
 ## Why this matters
 
