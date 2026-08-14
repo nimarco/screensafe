@@ -16,3 +16,6 @@ dist
 # Verification artifacts written by tools/ during local testing.
 public/sample/export-check.mp4
 public/sample/verified-export.mp4
+
+# Local benchmark footage (personal recordings — never commit these).
+public/testdata/
