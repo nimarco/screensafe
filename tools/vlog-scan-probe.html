@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>vlog scan probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * The benches call the detectors directly. This runs the real scanVideo
+       * over real camera footage, so the parts only the pipeline exercises —
+       * face tracking, QR corroboration across frames, finding assembly — are
+       * covered too.
+       */
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+
+      const q = new URLSearchParams(location.search);
+      const CLIP = q.get('clip') ?? 'vlog-b.mov';
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/testdata/' + CLIP)).blob();
+        const v = await loadVideo(new File([blob], CLIP, { type: 'video/quicktime' }));
+        say(`SOURCE ${CLIP} ${v.width}x${v.height} ${v.duration.toFixed(1)}s`);
+
+        const t0 = performance.now();
+        const res = await scanVideo(v, {
+          categories: new Set(['developer', 'personal', 'financial', 'network', 'visual']),
+          sampleFps: 2,
+          onProgress: (p) => { document.title = `${p.phase} ${p.t.toFixed(0)}/${p.duration.toFixed(0)}s`; },
+        });
+        say(`\nscanned in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+        say(`sampled ${res.stats.sampled}  analysed ${res.stats.analyzed}  skipped ${res.stats.skipped}`);
+        say(`\n${res.findings.length} findings`);
+        for (const f of res.findings) {
+          say(`  ${f.severity.padEnd(8)} ${f.label.padEnd(16)} ${f.start.toFixed(1)}-${f.end.toFixed(1)}s  ` +
+              `conf ${f.confidence.toFixed(2)}  ${f.occurrences.length} occ  ${f.masked}`);
+        }
+        const faces = res.findings.filter((f) => f.source === 'face');
+        const qr = res.findings.filter((f) => f.source === 'qr');
+        say(`\nface findings: ${faces.length}   qr findings: ${qr.length}  <- ground truth: face present throughout, no QR code anywhere`);
+        window.__scan = { findings: res.findings.length, faces: faces.length, qr: qr.length, stats: res.stats };
+        window.__done = true;
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__done = true;
+      }
+    </script>
+  </body>
+</html>

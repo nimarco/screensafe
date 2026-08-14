@@ -1,0 +1,190 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>face scale bench</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:16px">
+    <div id="out" style="white-space:pre-wrap">running…</div>
+    <div id="sheet" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px"></div>
+    <script type="module">
+      /*
+       * Recall vs. apparent face size, measured rather than argued about.
+       *
+       * Real camera footage of a real face is taken at native framing, then
+       * redrawn smaller inside a frame of the same dimensions. Shrinking the
+       * picture is exactly what standing further from the camera does to the
+       * face's pixel footprint, and it has the enormous advantage that ground
+       * truth comes free: we know where we put the face.
+       *
+       *   ?clip=vlog-a.mov&frames=6&scales=1,0.7,0.5,0.35,0.25,0.18,0.13,0.09
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { initFaceDetector, detectFaces, setFaceConfidence, isEstablishedFace } from '/src/lib/vision/faces.ts';
+
+      const q = new URLSearchParams(location.search);
+      const CLIP = q.get('clip') ?? 'vlog-a.mov';
+      const NFRAMES = Number(q.get('frames') ?? 6);
+      const SCALES = (q.get('scales') ?? '1,0.7,0.5,0.35,0.25,0.18,0.13,0.09').split(',').map(Number);
+      const SHEET = q.get('sheet') === '1';
+
+      // Each column: the smallest face the search is configured to look for, in
+      // source pixels, plus the confidence floor. 9999 means no tiling at all.
+      const CONFIGS = (q.get('configs') ?? '9999@0.45,256@0.45,128@0.45,64@0.45,48@0.45')
+        .split(',')
+        .map((s) => {
+          const [px, conf] = s.split('@');
+          return { label: Number(px) > 4096 ? 'frame' : `${px}px`, px: Number(px), conf: Number(conf) };
+        });
+
+      const out = document.getElementById('out');
+      const sheet = document.getElementById('sheet');
+      const say = (s = '') => (out.textContent += s + '\n');
+
+      const iou = (a, b) => {
+        const w = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+        const h = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        const inter = w * h;
+        const union = a.w * a.h + b.w * b.h - inter;
+        return union > 0 ? inter / union : 0;
+      };
+      const centerIn = (hit, truth) => {
+        const cx = hit.x + hit.w / 2, cy = hit.y + hit.h / 2;
+        return cx >= truth.x && cx <= truth.x + truth.w && cy >= truth.y && cy <= truth.y + truth.h;
+      };
+      // A box centred on the face but four times its size is not a detection of
+      // the face — at small scales the subject sits mid-frame, so a lazy centre
+      // test would score a whole-picture box as a hit and inflate every result.
+      const sizeOk = (hit, truth) => {
+        const r = (hit.w * hit.h) / (truth.w * truth.h);
+        return r >= 0.25 && r <= 4;
+      };
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/testdata/' + CLIP)).blob();
+        const v = await loadVideo(new File([blob], CLIP, { type: 'video/quicktime' }));
+        const det = await initFaceDetector();
+        say(`clip ${CLIP}  ${v.width}x${v.height}  ${v.duration.toFixed(1)}s   detector: ${det ? 'live' : 'UNAVAILABLE'}`);
+        if (!det) throw new Error('no detector');
+
+        const grab = createGrabber(v.width, v.height);
+        const compose = createGrabber(v.width, v.height);
+
+        // 1. Collect source frames whose face is unambiguous at native framing:
+        //    that detection is the ground truth every scaled copy is judged against.
+        await setFaceConfidence(0.45);
+        const sources = [];
+        for (let i = 0; i < NFRAMES; i++) {
+          const t = ((i + 0.5) * v.duration) / NFRAMES;
+          await seekTo(v.el, t);
+          grab.grab(v.el);
+          const faces = detectFaces(grab.canvas, v.width, v.height, { minFacePx: 9999, minConfidence: 0.7 });
+          if (faces.length !== 1) continue; // ambiguous truth — skip
+          const bmp = await createImageBitmap(grab.canvas);
+          sources.push({ t: +t.toFixed(2), truth: faces[0].box, bmp });
+        }
+        say(`ground-truth frames: ${sources.length}/${NFRAMES} (single unambiguous face at native framing)`);
+        const nativeFrac = sources.map((s) => s.truth.h / v.height);
+        say(`native face height : ${Math.min(...nativeFrac).toFixed(3)}–${Math.max(...nativeFrac).toFixed(3)} of frame\n`);
+
+        // 2. For every scale and config, redraw the frame smaller and re-detect.
+        const results = {};
+        for (const cfg of CONFIGS) {
+          await setFaceConfidence(cfg.conf);
+          results[cfg.label] = {};
+          for (const s of SCALES) {
+            let hits = 0, dup = 0, stray = 0, totalMs = 0, ious = [], confs = [];
+            for (const src of sources) {
+              const dw = Math.round(v.width * s), dh = Math.round(v.height * s);
+              const dx = Math.round((v.width - dw) / 2), dy = Math.round((v.height - dh) / 2);
+              compose.ctx.fillStyle = '#6b6b6b';
+              compose.ctx.fillRect(0, 0, v.width, v.height);
+              compose.ctx.drawImage(src.bmp, dx, dy, dw, dh);
+              const truth = {
+                x: dx + src.truth.x * s, y: dy + src.truth.y * s,
+                w: src.truth.w * s, h: src.truth.h * s,
+              };
+              const t0 = performance.now();
+              // detectFaces reports everything the model saw, scores included;
+              // the pipeline decides what is real per track. One frame is all
+              // this bench has, so apply the same bar to a single sighting.
+              const faces = detectFaces(compose.canvas, v.width, v.height, {
+                minFacePx: cfg.px,
+                minConfidence: cfg.conf,
+              }).filter((f) => isEstablishedFace(f.confidence));
+              totalMs += performance.now() - t0;
+              let best = null, bestIou = 0;
+              for (const f of faces) {
+                if (!sizeOk(f.box, truth)) continue;
+                const o = iou(f.box, truth);
+                if (o > bestIou || (!best && (o > 0 || centerIn(f.box, truth)))) { bestIou = o; best = f; }
+              }
+              const matched = !!best && (bestIou > 0.25 || centerIn(best.box, truth));
+              if (matched) { hits++; ious.push(bestIou); confs.push(best.confidence); }
+              // A second box landing on the same face is harmless — both get
+              // blurred. A box on empty background is the one that ruins a demo,
+              // so count the two separately instead of calling both a failure.
+              for (const f of faces) {
+                const onFace = iou(f.box, truth) > 0 || centerIn(f.box, truth);
+                if (onFace) { if (f !== best || !matched) dup++; } else stray++;
+              }
+
+              if (SHEET && s <= 0.35) {
+                const th = document.createElement('canvas');
+                th.width = 180; th.height = Math.round((180 * v.height) / v.width);
+                const cx = th.getContext('2d');
+                cx.drawImage(compose.canvas, 0, 0, th.width, th.height);
+                const k = th.width / v.width;
+                cx.lineWidth = 1; cx.strokeStyle = '#5b8cff';
+                cx.strokeRect(truth.x * k, truth.y * k, truth.w * k, truth.h * k);
+                cx.strokeStyle = matched ? '#7ee787' : '#ff7b72';
+                for (const f of faces) cx.strokeRect(f.box.x * k, f.box.y * k, f.box.w * k, f.box.h * k);
+                cx.fillStyle = '#000a'; cx.fillRect(0, 0, 96, 13);
+                cx.fillStyle = '#fff'; cx.font = '9px monospace';
+                cx.fillText(`${cfg.label} s=${s}`, 2, 10);
+                sheet.appendChild(th);
+              }
+            }
+            results[cfg.label][s] = {
+              hits, of: sources.length, dup, stray,
+              ms: +(totalMs / sources.length).toFixed(1),
+              iou: ious.length ? +(ious.reduce((a, b) => a + b, 0) / ious.length).toFixed(2) : 0,
+              conf: confs.length ? +(confs.reduce((a, b) => a + b, 0) / confs.length).toFixed(2) : 0,
+            };
+          }
+        }
+
+        // 3. Report: recall per apparent face height, plus cost per frame.
+        const faceFrac = (s) => (nativeFrac.reduce((a, b) => a + b, 0) / nativeFrac.length) * s;
+        say('recall by apparent face height (share of frames where the real face was found)');
+        say('');
+        say(`  ${'scale'.padEnd(7)}${'face px'.padEnd(9)}${'face h'.padEnd(9)}` +
+            CONFIGS.map((c) => c.label.padStart(13)).join(''));
+        for (const s of SCALES) {
+          // Face height in source pixels is the unit that actually governs the
+          // model, so a config asking for 64px faces should hold to about 64.
+          const px = faceFrac(s) * v.height;
+          let row = `  ${String(s).padEnd(7)}${px.toFixed(0).padEnd(9)}${faceFrac(s).toFixed(3).padEnd(9)}`;
+          for (const cfg of CONFIGS) {
+            const r = results[cfg.label][s];
+            row += `${r.hits}/${r.of}`.padStart(7) + ` ${String(r.stray).padStart(2)}stray`;
+          }
+          say(row);
+        }
+        say('');
+        say(`  ${'cost/frame'.padEnd(16)}` + CONFIGS.map((c) => {
+          const avg = SCALES.reduce((a, s) => a + results[c.label][s].ms, 0) / SCALES.length;
+          return `${avg.toFixed(1)}ms`.padStart(13);
+        }).join(''));
+        say('');
+        say('  hits/frames + stray boxes (detections nowhere near the face — the ones that ruin a demo)');
+        say(`  duplicate boxes on the face itself: ` + CONFIGS.map((c) =>
+          `${c.label}=${SCALES.reduce((a, s) => a + results[c.label][s].dup, 0)}`).join('  '));
+
+        window.__scale = { clip: CLIP, scales: SCALES, configs: CONFIGS.map((c) => c.label), nativeFrac, results };
+        window.__done = true;
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__done = true;
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,127 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>photographed screen — end to end</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * The whole path, on a real video file, for the case that used to return
+       * nothing: a camera pointed at an editor full of credentials.
+       *
+       * Scanning proves the rebuilt view reaches the detectors. Painting the
+       * findings back over the frame and reading it again proves something the
+       * bench cannot: that the boxes were mapped back through the deskew
+       * correctly. A transform that is even slightly wrong still produces
+       * findings — it just covers the wrong pixels, and the secrets survive into
+       * the export. Only closing the loop catches that.
+       */
+      import { simulatePhoto } from '/tools/photo-sim.js';
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, needsRebuild } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor } from '/src/lib/video/frames.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network']);
+      const t0 = performance.now();
+      const el = () => `t+${((performance.now() - t0) / 1000).toFixed(1)}s`;
+
+      /**
+       * Encodes the still fixture as a few seconds of video.
+       *
+       * The bitrate is not incidental. At MediaRecorder's default a 992x1280
+       * frame of 11px text compresses to nothing usable — the first run of this
+       * probe produced a 10KB file and, correctly, found no secrets in it.
+       */
+      async function makeVideo(canvas, seconds = 3) {
+        const stream = canvas.captureStream(10);
+        const rec = new MediaRecorder(stream, { mimeType: 'video/webm', videoBitsPerSecond: 24_000_000 });
+        const chunks = [];
+        rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+        const done = new Promise((r) => (rec.onstop = r));
+        rec.start();
+        // Keep the canvas producing frames; a static canvas emits almost none.
+        const ctx = canvas.getContext('2d');
+        const tick = setInterval(() => ctx.drawImage(canvas, 0, 0), 100);
+        await new Promise((r) => setTimeout(r, seconds * 1000));
+        clearInterval(tick);
+        rec.stop();
+        stream.getTracks().forEach((t) => t.stop());
+        await done;
+        return new Blob(chunks, { type: 'video/webm' });
+      }
+
+      try {
+        out.textContent = '';
+        say('[1/4] rendering a photographed screen…');
+        const { canvas } = await simulatePhoto();
+        const blob = await makeVideo(canvas);
+        const source = await loadVideo(new File([blob], 'photo.webm', { type: 'video/webm' }));
+        say(`  ${source.width}x${source.height} ${source.duration.toFixed(2)}s ${(blob.size/1e6).toFixed(2)}MB ${el()}`);
+
+        say('\n[2/4] scanning…');
+        const scan = await scanVideo(source, { categories: CATS, sampleFps: 2 });
+        say(`  ${scan.findings.length} findings · ${scan.stats.analyzed} frames analyzed · ${scan.stats.rebuilt} rebuilt ${el()}`);
+        for (const f of scan.findings) {
+          const b = f.occurrences[0]?.box;
+          say(`    ${f.severity.padEnd(8)} ${f.label.padEnd(20)} ${f.masked.padEnd(24)} box ${b ? `${b.x|0},${b.y|0} ${b.w|0}x${b.h|0}` : '—'}`);
+        }
+
+        if (!scan.stats.rebuilt) say('\n  WARNING: the rebuild never fired — the gate did not recognise this frame.');
+
+        say('\n[3/4] painting every finding over the frame, in source coordinates…');
+        const redacted = Object.assign(document.createElement('canvas'), { width: canvas.width, height: canvas.height });
+        const rctx = redacted.getContext('2d', { alpha: false });
+        rctx.drawImage(canvas, 0, 0);
+        rctx.fillStyle = '#101010';
+        let painted = 0;
+        for (const f of scan.findings) {
+          for (const o of f.occurrences) {
+            rctx.fillRect(o.box.x, o.box.y, o.box.w, o.box.h);
+            painted++;
+          }
+        }
+        say(`  ${painted} boxes painted ${el()}`);
+
+        say('\n[4/4] reading the covered frame again, same pipeline…');
+        const pool = new OcrPool();
+        await pool.init();
+        let leaked = [];
+        try {
+          const layout = analyseTextLayout(redacted, redacted.width, redacted.height);
+          const views = [];
+          const base = ocrScaleFor(redacted.width, redacted.height);
+          if (needsRebuild(layout)) {
+            const v = buildView(redacted, layout, { invert: layout.dark });
+            if (v) views.push(v);
+          }
+          for (const v of views) {
+            const r = await pool.recognize(v.canvas, 1);
+            for (const line of r.lines) {
+              const built = buildLine(line.words);
+              if (!built.text.trim()) continue;
+              for (const m of scanLine(built.text, CATS)) leaked.push(`${m.detectorId}:${m.value}`);
+            }
+          }
+        } finally { await pool.terminate(); }
+        say(`  ${leaked.length} still readable ${el()}`);
+        for (const l of leaked) say(`    STILL READABLE: ${l}`);
+
+        say('\n' + '='.repeat(62));
+        const ok = scan.findings.length > 0 && leaked.length === 0;
+        say(ok
+          ? `PASS — ${scan.findings.length} secrets found on a photographed screen, 0 readable once their boxes are covered.`
+          : `CHECK — found ${scan.findings.length}, still readable after covering: ${leaked.length}.`);
+        say('='.repeat(62));
+        window.__e2e = { found: scan.findings.length, rebuilt: scan.stats.rebuilt, leaked: leaked.length,
+                         labels: scan.findings.map((f) => `${f.label}=${f.masked}`) };
+      } catch (e) {
+        say('\nERROR: ' + (e?.stack ?? e));
+        window.__e2e = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

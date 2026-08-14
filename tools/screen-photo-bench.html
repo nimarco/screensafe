@@ -1,0 +1,191 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>screen photo bench</title>
+    <style>
+      body { background:#0b0d13; color:#e6e9ef; font:13px ui-monospace,Menlo,monospace; padding:16px; }
+      canvas { max-width:420px; border:1px solid #38404f; display:inline-block; margin:8px 8px 0 0; vertical-align:top; }
+      pre { white-space:pre-wrap; }
+      table { border-collapse:collapse; margin-top:12px; }
+      td, th { border:1px solid #38404f; padding:4px 10px; text-align:left; }
+      th { background:#171b24; }
+      .good { color:#5ddc9a; } .bad { color:#ff7b72; } .mid { color:#e3b341; }
+      button { background:#1f6feb; color:#fff; border:0; padding:6px 12px; border-radius:4px; cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <button id="run">run bench</button>
+    <label style="margin-left:12px">or a real photo <input id="file" type="file" accept="image/*" /></label>
+    <pre id="out">idle</pre>
+    <div id="shots"></div>
+    <div id="table"></div>
+
+    <script type="module">
+      import { simulatePhoto, EXPECTED_SECRETS } from '/tools/photo-sim.js';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, scaleForPitch } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor } from '/src/lib/video/frames.ts';
+      import { meanLuma, signatureOf } from '/src/lib/video/diff.ts';
+
+      const ALL = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+      const out = document.querySelector('#out');
+      const shots = document.querySelector('#shots');
+      const tableEl = document.querySelector('#table');
+      const say = (v) => { out.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2); };
+
+      function canvasOf(w, h) {
+        return Object.assign(document.createElement('canvas'), { width: w, height: h });
+      }
+
+      /** Current production behaviour: whole frame, gentle upscale, invert if dark. */
+      function baselineView(src) {
+        const dark = meanLuma(signatureOf(src)) < 110;
+        const scale = ocrScaleFor(src.width, src.height);
+        const c = canvasOf(Math.round(src.width * scale), Math.round(src.height * scale));
+        const ctx = c.getContext('2d', { alpha: false });
+        ctx.filter = dark ? 'invert(1)' : 'none';
+        ctx.drawImage(src, 0, 0, c.width, c.height);
+        ctx.filter = 'none';
+        return { canvas: c, name: 'baseline', toSource: (b) => ({ x: b.x/scale, y: b.y/scale, w: b.w/scale, h: b.h/scale }) };
+      }
+
+      /** Crop the measured region but leave the rotation in, to isolate deskew's share. */
+      function cropOnlyView(src, layout) {
+        return buildView(src, { ...layout, skewDeg: 0 }, { invert: layout.dark, name: 'crop-only' });
+      }
+
+      /** One pass over a set of views; `passes` are unioned the way a scan would. */
+      async function measure(pool, passes) {
+        const t0 = performance.now();
+        let chars = 0;
+        const lines = [];
+        const hits = [];
+        for (const { views, mode } of passes) {
+          for (const v of views) {
+            const res = await pool.recognize(v.canvas, 1, { mode });
+            for (const line of res.lines) {
+              const built = buildLine(line.words);
+              if (!built.text.trim()) continue;
+              chars += built.text.length;
+              lines.push(built.text);
+              for (const m of scanLine(built.text, ALL)) hits.push({ det: m.detectorId, value: m.value });
+            }
+          }
+        }
+        const blob = lines.join('\n');
+        // Recall is the only number that matters: did a detector actually fire
+        // on each secret that was on the screen?
+        const caught = EXPECTED_SECRETS.filter((s) =>
+          hits.some((h) => fuzzyHas(h.value, s.needle) || fuzzyHas(s.needle, h.value)),
+        );
+        return {
+          ms: Math.round(performance.now() - t0),
+          lines: lines.length,
+          chars,
+          secretsRead: EXPECTED_SECRETS.filter((s) => fuzzyHas(blob, s.needle)).length,
+          caught: caught.length,
+          caughtNames: caught.map((c) => c.name),
+          missed: EXPECTED_SECRETS.filter((s) => !caught.includes(s)).map((s) => s.name),
+          distinct: [...new Set(hits.map((h) => `${h.det}|${h.value.slice(0, 14)}`))].length,
+          detectors: [...new Set(hits.map((h) => h.det))],
+          text: lines,
+        };
+      }
+
+      /**
+       * OCR drops and inserts characters, so position-wise comparison lies:
+       * reading `51N` as `SiIN` shifts everything after it and scores zero even
+       * though the value was plainly recovered. Longest common subsequence
+       * tolerates the shift, which is what "did it read this" actually means.
+       */
+      function fuzzyHas(haystack, needle) {
+        if (!haystack || !needle) return false;
+        const a = needle, b = haystack;
+        if (b.length > 4000) return false;
+        let prev = new Uint16Array(b.length + 1);
+        let cur = new Uint16Array(b.length + 1);
+        for (let i = 1; i <= a.length; i++) {
+          for (let j = 1; j <= b.length; j++) {
+            cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+          }
+          [prev, cur] = [cur, prev];
+          cur.fill(0);
+        }
+        return prev[b.length] >= a.length * 0.7;
+      }
+
+      async function bench(src) {
+        shots.innerHTML = '';
+        const preview = canvasOf(src.width, src.height);
+        preview.getContext('2d').drawImage(src, 0, 0);
+        shots.append(preview);
+
+        const layout = analyseTextLayout(src, src.width, src.height);
+        say({ status: 'measuring…', layout, derivedScale: scaleForPitch(layout.linePitch) });
+
+        const deskewed = buildView(src, layout, { invert: layout.dark, name: 'deskew' });
+        const contrast = buildView(src, layout, { invert: layout.dark, filter: 'grayscale(1) contrast(1.6)', name: 'contrast' });
+        const cropOnly = cropOnlyView(src, layout);
+
+        const one = (v, mode) => (v ? [{ views: [v], mode }] : []);
+        const cases = [
+          ['A  baseline whole-frame (current)', [{ views: [baselineView(src)], mode: 'auto' }]],
+          ['B  baseline + sparse psm', [{ views: [baselineView(src)], mode: 'sparse' }]],
+          ['C  crop only, no deskew', one(cropOnly, 'auto')],
+          ['D  crop + deskew + upscale', one(deskewed, 'auto')],
+          ['E  crop + deskew, sparse psm', one(deskewed, 'sparse')],
+          ['F  crop + deskew, block psm', one(deskewed, 'block')],
+          ['G  contrast + deskew', one(contrast, 'auto')],
+          ['H  deskew auto + sparse (union)', deskewed ? [{ views: [deskewed], mode: 'auto' }, { views: [deskewed], mode: 'sparse' }] : []],
+          ['I  baseline + deskew (union, production shape)', deskewed ? [{ views: [baselineView(src)], mode: 'auto' }, { views: [deskewed], mode: 'auto' }] : []],
+        ];
+
+        const pool = new OcrPool();
+        await pool.init();
+        const rows = [];
+        try {
+          for (const [name, passes] of cases) {
+            if (!passes.length) { rows.push({ name, skipped: true }); continue; }
+            const r = await measure(pool, passes);
+            rows.push({ name, ...r });
+            render(rows, layout);
+          }
+        } finally {
+          await pool.terminate();
+        }
+        window.__bench = { layout, rows };
+        say({ layout, best: rows.filter((r) => !r.skipped).sort((a, b) => b.secretsRead - a.secretsRead)[0]?.name });
+      }
+
+      function render(rows, layout) {
+        const n = EXPECTED_SECRETS.length;
+        const cell = (r) => {
+          const cls = r.caught >= n - 1 ? 'good' : r.caught >= 2 ? 'mid' : 'bad';
+          return `<tr><td>${r.name}</td>${r.skipped ? '<td colspan=6>skipped</td>' :
+            `<td class=${cls}>${r.caught}/${n}</td><td>${r.secretsRead}/${n}</td><td>${r.chars}</td><td>${r.ms}ms</td><td>${r.missed.join(', ')}</td>`}</tr>`;
+        };
+        tableEl.innerHTML = `<p>skew ${layout.skewDeg.toFixed(2)}° · pitch ${layout.linePitch.toFixed(1)}px · density ${(layout.density*100).toFixed(0)}%</p>
+          <table><tr><th>variant</th><th>detected</th><th>read</th><th>chars</th><th>time</th><th>missed</th></tr>${rows.map(cell).join('')}</table>`;
+      }
+
+      document.querySelector('#run').addEventListener('click', async () => {
+        say('rendering fixture…');
+        const { canvas } = await simulatePhoto();
+        await bench(canvas);
+      });
+
+      document.querySelector('#file').addEventListener('change', async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        // A backgrounded tab never resolves img.decode(); createImageBitmap works.
+        const bitmap = await createImageBitmap(f);
+        const c = canvasOf(bitmap.width, bitmap.height);
+        c.getContext('2d', { alpha: false }).drawImage(bitmap, 0, 0);
+        bitmap.close();
+        await bench(c);
+      });
+    </script>
+  </body>
+</html>

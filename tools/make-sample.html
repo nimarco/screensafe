@@ -120,7 +120,7 @@
         const rows = [
           [D(' 1  '), P('import'), T(' { OpenAI } '), P('from'), V(' "openai"'), T(';')],
           [D(' 2  ')],
-          [D(' 3  '), D('// TODO: move these to env before launch')],
+          [D(' 3  '), D('// keep sensitive config out of source files')],
           [D(' 4  '), P('const'), K(' OPENAI_KEY'), T(' = '), V('"' + SAMPLE.openai + '"'), T(';')],
           [D(' 5  '), P('const'), K(' SUPPORT_EMAIL'), T(' = '), V('"marco.nunes@gmail.com"'), T(';')],
           [D(' 6  '), P('const'), K(' SUPPORT_PHONE'), T(' = '), V('"(314) 555-0192"'), T(';')],

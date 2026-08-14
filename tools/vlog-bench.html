@@ -1,0 +1,182 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>vlog detector bench</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:16px">
+    <div id="out" style="white-space:pre-wrap">running…</div>
+    <div id="sheet" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px"></div>
+    <script type="module">
+      /*
+       * Before/after on real camera footage — the footage class ScreenSafe was
+       * never tuned for. Screen recordings are static, high-contrast and
+       * synthetic; a vlog is none of those.
+       *
+       * Three measurements, all on the same decoded frames:
+       *   faces  recall and stray boxes for each search mode
+       *   qr     false positives on footage containing no QR code at all
+       *   qr+    true positives, by compositing a real QR code into that footage
+       *
+       * Query params:
+       *   ?clip=vlog-a.mov&fps=2&max=100&qr=1&modules=2,3,4,6,8
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { initFaceDetector, detectFaces } from '/src/lib/vision/faces.ts';
+      import { detectQr } from '/src/lib/vision/qr.ts';
+      import { QR_URL } from '/scripts/fixtures/qrFixtures.ts';
+      import jsQR from 'jsqr';
+
+      const q = new URLSearchParams(location.search);
+      const CLIP = q.get('clip') ?? 'vlog-a.mov';
+      const FPS = Number(q.get('fps') ?? 2);
+      const MAX = Number(q.get('max') ?? 100);
+      const FACE_CONFIGS = (q.get('faces') ?? 'frame,deep,micro').split(',');
+      const QR_MODULES = (q.get('modules') ?? '2,3,4,6,8').split(',').map(Number);
+      const RUN_QR_SYNTH = q.get('qr') !== '0';
+      /** Same window scan.ts uses to corroborate a borderline QR read. */
+      const CORROBORATION_S = 4;
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const iou = (a, b) => {
+        const w = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+        const h = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        const inter = w * h, union = a.w * a.h + b.w * b.h - inter;
+        return union > 0 ? inter / union : 0;
+      };
+
+      /** Paint a fixture QR onto the frame, and report where it landed. */
+      function stampQr(ctx, fx, x, y, module, quiet = 4) {
+        const n = fx.rows.length;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(x, y, (n + quiet * 2) * module, (n + quiet * 2) * module);
+        ctx.fillStyle = '#000';
+        for (let r = 0; r < n; r++)
+          for (let c = 0; c < n; c++)
+            if (fx.rows[r][c] === '#')
+              ctx.fillRect(x + (c + quiet) * module, y + (r + quiet) * module, module, module);
+        return { x: x + quiet * module, y: y + quiet * module, w: n * module, h: n * module };
+      }
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/testdata/' + CLIP)).blob();
+        const v = await loadVideo(new File([blob], CLIP, { type: 'video/quicktime' }));
+        const det = await initFaceDetector();
+        say(`clip ${CLIP}  ${v.width}x${v.height}  ${v.duration.toFixed(1)}s  detector ${det ? 'live' : 'DEAD'}`);
+
+        const full = createGrabber(v.width, v.height);
+        const stage = createGrabber(v.width, v.height);
+        const interval = 1 / FPS;
+
+        const face = Object.fromEntries(FACE_CONFIGS.map((c) => [c, { frames: 0, boxes: 0, stray: 0, ms: 0 }]));
+        const qrRaw = [];       // what jsQR alone reports
+        const qrValidated = []; // what survives judgeQr
+        let n = 0;
+
+        for (let i = 0; i < MAX; i++) {
+          const t = i * interval;
+          if (t >= v.duration) break;
+          await seekTo(v.el, t);
+          full.grab(v.el);
+          n++;
+
+          // --- faces: every mode on the identical frame -------------------
+          const perConfig = {};
+          for (const cfg of FACE_CONFIGS) {
+            const t0 = performance.now();
+            const hits = detectFaces(full.canvas, v.width, v.height, { minFacePx: Number(cfg) });
+            face[cfg].ms += performance.now() - t0;
+            face[cfg].boxes += hits.length;
+            if (hits.length) face[cfg].frames++;
+            perConfig[cfg] = hits;
+          }
+          // Truth: the single-pass detection, which is reliable on this footage
+          // because the subject is close. Anything a deeper mode reports that
+          // does not touch it is a box on nothing.
+          const truth = perConfig[FACE_CONFIGS[0]]?.[0]?.box ?? null;
+          if (truth) {
+            for (const cfg of FACE_CONFIGS)
+              for (const f of perConfig[cfg]) if (iou(f.box, truth) === 0) face[cfg].stray++;
+          }
+
+          // --- QR on untouched footage: every hit here is a false positive ---
+          const img = full.toImageData();
+          const raw = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+          if (raw?.location) {
+            const L = raw.location;
+            qrRaw.push({
+              t: +t.toFixed(2), data: raw.data ?? '', version: raw.version,
+              corners: {
+                tl: { x: +L.topLeftCorner.x.toFixed(2), y: +L.topLeftCorner.y.toFixed(2) },
+                tr: { x: +L.topRightCorner.x.toFixed(2), y: +L.topRightCorner.y.toFixed(2) },
+                br: { x: +L.bottomRightCorner.x.toFixed(2), y: +L.bottomRightCorner.y.toFixed(2) },
+                bl: { x: +L.bottomLeftCorner.x.toFixed(2), y: +L.bottomLeftCorner.y.toFixed(2) },
+              },
+            });
+          }
+          for (const hit of detectQr(img)) qrValidated.push({ t: +t.toFixed(2), ...hit });
+        }
+
+        say(`\nsampled ${n} frames @ ${FPS}fps\n`);
+
+        say('FACES  (frame = today, deep/micro = tiled search)');
+        say(`  ${'mode'.padEnd(8)}${'frames w/ face'.padEnd(17)}${'boxes'.padEnd(8)}${'stray'.padEnd(8)}ms/frame`);
+        for (const cfg of FACE_CONFIGS) {
+          const f = face[cfg];
+          say(`  ${cfg.padEnd(8)}${`${f.frames}/${n} (${((100 * f.frames) / n).toFixed(0)}%)`.padEnd(17)}` +
+              `${String(f.boxes).padEnd(8)}${String(f.stray).padEnd(8)}${(f.ms / n).toFixed(1)}`);
+        }
+
+        say(`\nQR ON UNTOUCHED FOOTAGE  (ground truth: this clip contains no QR code)`);
+        say(`  raw jsQR        ${qrRaw.length} hit(s) in ${n} frames  <- what shipped`);
+        say(`  after validation ${qrValidated.length} hit(s)`);
+        for (const r of qrRaw) {
+          say(`    ${String(r.t).padStart(6)}s  v${r.version}  payload ${JSON.stringify((r.data ?? '').slice(0, 30))}`);
+          say(`             corners ${JSON.stringify(r.corners)}`);
+        }
+        for (const h of qrValidated) {
+          say(`    SURVIVED ${h.t}s ${h.strength} ${JSON.stringify(h.data.slice(0, 40))} ${JSON.stringify(h.evidence)}`);
+        }
+
+        if (RUN_QR_SYNTH) {
+          say(`\nQR TRUE POSITIVES  (a real QR code composited into the same footage)`);
+          say(`  ${'module'.padEnd(8)}${'code size'.padEnd(12)}${'raw jsQR'.padEnd(12)}${'validated'.padEnd(12)}${'strength'.padEnd(10)}payload ok`);
+          const synth = {};
+          for (const m of QR_MODULES) {
+            let rawHits = 0, okHits = 0, correct = 0, strengths = [];
+            const times = [];
+            for (let i = 0; i < Math.min(MAX, 20); i++) {
+              const t = i * interval;
+              if (t >= v.duration) break;
+              await seekTo(v.el, t);
+              stage.grab(v.el);
+              const side = (QR_URL.rows.length + 8) * m;
+              const box = stampQr(stage.ctx, QR_URL, v.width - side - 40, 40, m);
+              const img = stage.toImageData();
+              const raw = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+              if (raw?.location) rawHits++;
+              const hits = detectQr(img);
+              for (const h of hits) {
+                okHits++;
+                if (h.data === QR_URL.payload && iou(h.box, box) > 0.5) correct++;
+                strengths.push(h.strength);
+              }
+              times.push(t);
+            }
+            const nn = Math.min(MAX, 20, Math.ceil(v.duration / interval));
+            synth[m] = { rawHits, okHits, correct, of: nn };
+            const codePx = QR_URL.rows.length * m;
+            say(`  ${String(m).padEnd(8)}${`${codePx}px`.padEnd(12)}${`${rawHits}/${nn}`.padEnd(12)}` +
+                `${`${okHits}/${nn}`.padEnd(12)}${(strengths[0] ?? '-').padEnd(10)}${correct}/${nn}`);
+          }
+          window.__synth = synth;
+        }
+
+        window.__bench = { clip: CLIP, frames: n, face, qrRaw, qrValidated };
+        window.__done = true;
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__done = true;
+      }
+    </script>
+  </body>
+</html>

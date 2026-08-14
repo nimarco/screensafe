@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>duplicate rows probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * When both passes succeed, does the reviewer see one row or two?
+       *
+       * The rebuild adds a second read of the same pixels, and the two reads make
+       * different character errors. Track merging refuses — correctly — to
+       * collapse two similar-length values that differ, because `203.0.113.42`
+       * and `203.0.113.99` are not the same secret. The risk is that the same
+       * secret, read twice with one character of disagreement, trips that same
+       * rule and shows up as two rows.
+       *
+       * A clean, gently rotated capture is the case that exposes it: the gate
+       * fires, and the whole-frame pass can still read the text.
+       */
+      import { renderEditor } from '/tools/photo-sim.js';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, needsRebuild, mapWordsToSource } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor } from '/src/lib/video/frames.ts';
+      import { sameSecret } from '/src/lib/detectors/similarity.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer','personal','financial','network']);
+
+      try {
+        out.textContent = '';
+        const editor = renderEditor();
+        const W = 1400, H = 1000;
+        const frame = Object.assign(document.createElement('canvas'), { width: W, height: H });
+        const ctx = frame.getContext('2d', { alpha: false });
+        ctx.fillStyle = '#1e1e1e'; ctx.fillRect(0, 0, W, H);
+        ctx.translate(W/2, H/2); ctx.rotate(3 * Math.PI/180); ctx.translate(-W/2, -H/2);
+        ctx.drawImage(editor, 40, 40, editor.width*0.92, editor.height*0.92);
+        ctx.setTransform(1,0,0,1,0,0);
+
+        const layout = analyseTextLayout(frame, W, H);
+        const base = ocrScaleFor(W, H);
+        say(`skew ${layout.skewDeg.toFixed(2)}°  pitch ${layout.linePitch.toFixed(1)}  gate ${needsRebuild(layout)}\n`);
+
+        const pool = new OcrPool(); await pool.init();
+        let baseHits = [], rebuiltHits = [];
+        try {
+          const bc = Object.assign(document.createElement('canvas'), { width: Math.round(W*base), height: Math.round(H*base) });
+          const bctx = bc.getContext('2d',{alpha:false});
+          bctx.filter = 'invert(1)';
+          bctx.drawImage(frame, 0, 0, bc.width, bc.height);
+          bctx.filter = 'none';
+          const collect = (lines) => {
+            const hits = [];
+            for (const l of lines) { const b = buildLine(l.words); if (!b.text.trim()) continue;
+              for (const m of scanLine(b.text, CATS)) hits.push(m.value); }
+            return hits;
+          };
+          baseHits = collect((await pool.recognize(bc, base)).lines);
+          const v = buildView(frame, layout, { invert: layout.dark });
+          rebuiltHits = collect(mapWordsToSource((await pool.recognize(v.canvas, 1)).lines, v));
+        } finally { await pool.terminate(); }
+
+        say(`whole-frame pass found ${baseHits.length}:`);
+        for (const h of baseHits) say(`    ${h}`);
+        say(`\nrebuilt pass found ${rebuiltHits.length}:`);
+        for (const h of rebuiltHits) say(`    ${h}`);
+
+        say('\ncross-check — would track merging collapse each pair?');
+        let wouldDuplicate = 0;
+        for (const b of baseHits) {
+          const twin = rebuiltHits.find((r) => sameSecret(b, r));
+          const near = rebuiltHits.find((r) => r !== twin && r.slice(0, 8) === b.slice(0, 8));
+          if (!twin && near) {
+            wouldDuplicate++;
+            say(`    TWO ROWS: "${b}"  vs  "${near}"`);
+          } else if (twin) {
+            say(`    merges:   "${b}"  ==  "${twin}"`);
+          } else {
+            say(`    only in whole-frame: "${b}"`);
+          }
+        }
+        say('\n' + '='.repeat(60));
+        say(wouldDuplicate === 0
+          ? 'PASS — no secret would be shown as two separate rows.'
+          : `FAIL — ${wouldDuplicate} secrets would appear twice in the review queue.`);
+        say('='.repeat(60));
+        window.__dupes = { baseHits, rebuiltHits, wouldDuplicate };
+      } catch (e) {
+        say('ERROR ' + (e?.stack ?? e));
+        window.__dupes = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

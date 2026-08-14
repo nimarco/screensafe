@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>attached OCR probe</title>
+    <style>
+      body { background:#0b0d13; color:#e6e9ef; font:13px ui-monospace,Menlo,monospace; padding:16px; }
+      canvas { max-width:100%; border:1px solid #38404f; display:block; margin-top:12px; }
+      pre { white-space:pre-wrap; }
+      .good { color:#5ddc9a; } .bad { color:#ff7b72; } .dim { color:#8b93a7; }
+      h3 { font-size:13px; margin:18px 0 4px; }
+    </style>
+  </head>
+  <body>
+    <p>Drop in a photo of a screen. This runs the same two passes a scan runs.</p>
+    <label>Image <input id="file" type="file" accept="image/*" /></label>
+    <pre id="out">choose an image…</pre>
+    <div id="shots"></div>
+
+    <script type="module">
+      /*
+       * Answers one question about one still image: would a scan find the
+       * secrets in it, and which of the two passes did the finding?
+       *
+       * The whole-frame pass is what the app has always done. The rebuild is the
+       * recovery path for frames that are a camera pointed at a screen — see
+       * src/lib/ocr/preprocess.ts.
+       */
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, needsRebuild, mapWordsToSource } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor } from '/src/lib/video/frames.ts';
+      import { meanLuma, signatureOf } from '/src/lib/video/diff.ts';
+
+      const ALL = new Set(['developer', 'personal', 'financial', 'network']);
+      const out = document.querySelector('#out');
+      const shots = document.querySelector('#shots');
+      const say = (s = '') => (out.innerHTML += s + '\n');
+
+      async function readWith(pool, canvas, scale, mapper) {
+        const res = await pool.recognize(canvas, scale);
+        const lines = mapper ? mapper(res.lines) : res.lines;
+        const text = [];
+        const hits = [];
+        for (const line of lines) {
+          const built = buildLine(line.words);
+          if (!built.text.trim()) continue;
+          text.push(built.text);
+          for (const m of scanLine(built.text, ALL)) hits.push(m);
+        }
+        return { text, hits };
+      }
+
+      document.querySelector('#file').addEventListener('change', async (e) => {
+        const f = e.target.files?.[0];
+        if (!f) return;
+        out.innerHTML = '';
+        shots.innerHTML = '';
+
+        // createImageBitmap, not Image + decode(): a backgrounded tab never
+        // resolves decode(), so the probe would sit silently forever if you
+        // switched away from it while picking the file.
+        const bitmap = await createImageBitmap(f);
+        const src = Object.assign(document.createElement('canvas'), { width: bitmap.width, height: bitmap.height });
+        src.getContext('2d', { alpha: false }).drawImage(bitmap, 0, 0);
+        bitmap.close();
+
+        const layout = analyseTextLayout(src, src.width, src.height);
+        const gate = needsRebuild(layout);
+        say(`image      ${src.width}x${src.height}`);
+        say(`skew       ${layout.skewDeg.toFixed(2)}°`);
+        say(`line pitch ${layout.linePitch.toFixed(1)}px`);
+        say(`density    ${(layout.density * 100).toFixed(1)}%`);
+        say(`dark text  ${layout.dark}`);
+        say(`rebuild    ${gate ? '<span class=good>yes — this looks like a photographed screen</span>' : '<span class=dim>no — this looks like a screen capture</span>'}`);
+
+        const pool = new OcrPool();
+        try {
+          await pool.init();
+
+          const scale = ocrScaleFor(src.width, src.height);
+          const wf = Object.assign(document.createElement('canvas'), { width: Math.round(src.width*scale), height: Math.round(src.height*scale) });
+          const wctx = wf.getContext('2d', { alpha: false });
+          wctx.filter = meanLuma(signatureOf(src)) < 110 ? 'invert(1)' : 'none';
+          wctx.drawImage(src, 0, 0, wf.width, wf.height);
+          wctx.filter = 'none';
+          const whole = await readWith(pool, wf, scale);
+
+          let rebuilt = { text: [], hits: [] };
+          let view = null;
+          if (gate) {
+            view = buildView(src, layout, { invert: layout.dark });
+            if (view) rebuilt = await readWith(pool, view.canvas, 1, (l) => mapWordsToSource(l, view));
+          }
+
+          const all = [...whole.hits, ...rebuilt.hits];
+          say(`\n<h3>whole-frame pass — ${whole.text.length} lines, ${whole.hits.length} findings</h3>`);
+          for (const h of whole.hits) say(`  ${h.severity.padEnd(8)} ${h.label.padEnd(24)} ${h.value.slice(0, 40)}`);
+          say(`\n<h3>rebuilt pass — ${rebuilt.text.length} lines, ${rebuilt.hits.length} findings</h3>`);
+          for (const h of rebuilt.hits) say(`  ${h.severity.padEnd(8)} ${h.label.padEnd(24)} ${h.value.slice(0, 40)}`);
+
+          say(`\n<h3>text recovered</h3>`);
+          for (const t of (rebuilt.text.length ? rebuilt.text : whole.text)) say(`  ${t.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}`);
+
+          say(`\n${all.length ? `<span class=good>${all.length} findings total.</span>` : '<span class=bad>Nothing found. If the text is legible to you, save the frame and attach it.</span>'}`);
+
+          if (view) {
+            const vis = Object.assign(document.createElement('canvas'), { width: view.canvas.width, height: view.canvas.height });
+            vis.getContext('2d').drawImage(view.canvas, 0, 0);
+            shots.append(vis);
+          }
+          window.__probe = { layout, gate, whole: whole.hits.length, rebuilt: rebuilt.hits.length, text: rebuilt.text.length ? rebuilt.text : whole.text };
+        } catch (err) {
+          say('\nERROR ' + String(err?.stack ?? err));
+        } finally {
+          await pool.terminate();
+        }
+      });
+    </script>
+  </body>
+</html>

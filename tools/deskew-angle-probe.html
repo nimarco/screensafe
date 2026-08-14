@@ -1,0 +1,92 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>deskew angle probe</title>
+    <style>
+      body { background:#0b0d13; color:#e6e9ef; font:13px ui-monospace,Menlo,monospace; padding:16px; }
+      table { border-collapse:collapse; margin-top:12px; }
+      td, th { border:1px solid #38404f; padding:4px 10px; text-align:left; }
+      th { background:#171b24; }
+      .good { color:#5ddc9a; } .bad { color:#ff7b72; } .mid { color:#e3b341; }
+      button { background:#1f6feb; color:#fff; border:0; padding:6px 12px; border-radius:4px; cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <button id="run">run</button>
+    <pre id="out">idle</pre>
+    <div id="table"></div>
+    <script type="module">
+      import { simulatePhoto, EXPECTED_SECRETS } from '/tools/photo-sim.js';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, needsRebuild } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+
+      const ALL = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+      const out = document.querySelector('#out');
+
+      function lcsHas(needle, hay) {
+        if (!needle || !hay || hay.length > 4000) return false;
+        let prev = new Uint16Array(hay.length + 1), cur = new Uint16Array(hay.length + 1);
+        for (let i = 1; i <= needle.length; i++) {
+          for (let j = 1; j <= hay.length; j++)
+            cur[j] = needle[i-1] === hay[j-1] ? prev[j-1] + 1 : Math.max(prev[j], cur[j-1]);
+          [prev, cur] = [cur, prev]; cur.fill(0);
+        }
+        return prev[hay.length] >= needle.length * 0.7;
+      }
+
+      async function recall(pool, views) {
+        const hits = [];
+        for (const v of views) {
+          const res = await pool.recognize(v.canvas, 1);
+          for (const line of res.lines) {
+            const built = buildLine(line.words);
+            if (!built.text.trim()) continue;
+            for (const m of scanLine(built.text, ALL)) hits.push(m.value);
+          }
+        }
+        return EXPECTED_SECRETS.filter((s) => hits.some((h) => lcsHas(s.needle, h) || lcsHas(h, s.needle))).length;
+      }
+
+      // Sweep from a mild tilt to a photo taken well off-axis, where a single
+      // global rotation can no longer square up both ends of the block.
+      const SETUPS = [
+        { name: 'mild    rot -3  key 0.02', rotateDeg: -3, keystone: 0.02 },
+        { name: 'typical rot -7  key 0.05', rotateDeg: -7, keystone: 0.05 },
+        { name: 'steep   rot -11 key 0.12', rotateDeg: -11, keystone: 0.12 },
+        { name: 'harsh   rot -14 key 0.20', rotateDeg: -14, keystone: 0.20 },
+        { name: 'flat    rot  0  key 0',    rotateDeg: 0,  keystone: 0, screenScale: 0.95 },
+      ];
+
+      document.querySelector('#run').addEventListener('click', async () => {
+        const pool = new OcrPool();
+        await pool.init();
+        const rows = [];
+        try {
+          for (const setup of SETUPS) {
+            out.textContent = 'running ' + setup.name;
+            const { canvas } = await simulatePhoto(setup);
+            const layout = analyseTextLayout(canvas, canvas.width, canvas.height);
+            const view = buildView(canvas, layout, { invert: layout.dark });
+            const single = view ? await recall(pool, [view]) : 0;
+            const residual = view ? analyseTextLayout(view.canvas, view.canvas.width, view.canvas.height).skewDeg : 0;
+            rows.push({ ...setup, skew: layout.skewDeg, residual, gate: needsRebuild(layout), single });
+            render(rows);
+          }
+        } finally { await pool.terminate(); }
+        window.__angles = rows;
+        out.textContent = 'done';
+      });
+
+      function render(rows) {
+        const n = EXPECTED_SECRETS.length;
+        const cls = (v) => v >= n - 1 ? 'good' : v >= 2 ? 'mid' : 'bad';
+        document.querySelector('#table').innerHTML =
+          `<table><tr><th>setup</th><th>measured skew</th><th>residual after rebuild</th><th>gate fires</th><th>secrets detected</th></tr>` +
+          rows.map(r => `<tr><td>${r.name}</td><td>${r.skew.toFixed(2)}°</td><td>${r.residual.toFixed(2)}°</td><td>${r.gate}</td>
+            <td class=${cls(r.single)}>${r.single}/${n}</td></tr>`).join('') + '</table>';
+      }
+    </script>
+  </body>
+</html>

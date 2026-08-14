@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>gate diagnosis</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /* Why does the rebuild gate fire on a recording that has no skew at all? */
+      import { loadVideo, seekTo, createGrabber, ocrScaleFor } from '/src/lib/video/frames.ts';
+      import { analyseTextLayout, needsRebuild, SKEW_FLOOR_DEG } from '/src/lib/ocr/preprocess.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const v = await loadVideo(new File([blob], 'demo.mp4', { type: 'video/mp4' }));
+        const grab = createGrabber(v.width, v.height);
+        const base = ocrScaleFor(v.width, v.height);
+        say(`${v.width}x${v.height}  baseline scale ${base.toFixed(2)}  skew floor ${SKEW_FLOOR_DEG}°\n`);
+        say('  t     skew    pitch  eff.pitch  density  gate   why');
+
+        const rows = [];
+        for (let t = 0; t < v.duration; t += 0.5) {
+          await seekTo(v.el, t);
+          grab.grab(v.el);
+          const L = analyseTextLayout(grab.canvas, v.width, v.height);
+          const eff = L.linePitch * base;
+          const gate = needsRebuild(L);
+          const why = !L.region ? 'no region'
+            : L.density < 0.02 ? 'too sparse'
+            : Math.abs(L.skewDeg) >= SKEW_FLOOR_DEG ? 'SKEW'
+            : '-';
+          rows.push({ t: +t.toFixed(1), skew: +L.skewDeg.toFixed(2), pitch: +L.linePitch.toFixed(1), eff: +eff.toFixed(1), density: +L.density.toFixed(3), gate, why });
+          say(`  ${t.toFixed(1).padStart(4)}  ${L.skewDeg.toFixed(2).padStart(6)}  ${L.linePitch.toFixed(1).padStart(5)}  ${eff.toFixed(1).padStart(8)}  ${L.density.toFixed(3).padStart(7)}  ${String(gate).padEnd(5)}  ${why}`);
+        }
+        const fired = rows.filter((r) => r.gate);
+        say(`\n${fired.length} of ${rows.length} sampled frames would rebuild.`);
+        window.__gate = { rows, fired };
+      } catch (e) {
+        say('ERROR ' + (e?.stack ?? e));
+        window.__gate = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

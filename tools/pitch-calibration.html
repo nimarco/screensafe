@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>pitch calibration</title>
+  <style>
+    body { background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px; }
+    table { border-collapse:collapse; margin-top:12px; }
+    td, th { border:1px solid #38404f; padding:4px 10px; text-align:left; }
+    th { background:#171b24; }
+    .good { color:#5ddc9a; } .bad { color:#ff7b72; } .mid { color:#e3b341; }
+    button { background:#1f6feb;color:#fff;border:0;padding:6px 12px;border-radius:4px;cursor:pointer; }
+  </style>
+  </head>
+  <body>
+    <button id="run">run</button>
+    <pre id="out">idle</pre>
+    <div id="table"></div>
+    <script type="module">
+      /*
+       * Where does the whole-frame pass actually stop reading clean text?
+       *
+       * The photographed fixture cannot answer this: it is small *and* blurred
+       * *and* re-encoded, so it says the baseline dies at a line pitch that a
+       * crisp screen capture of the same size sails through. Gating the rebuild
+       * on the wrong number would double the scan time of ordinary recordings.
+       * So: render the same editor at a range of sizes with no photo simulation
+       * at all, and find the pitch where the baseline gives up.
+       */
+      import { renderEditor, EXPECTED_SECRETS } from '/tools/photo-sim.js';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView, needsRebuild } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor } from '/src/lib/video/frames.ts';
+      import { meanLuma, signatureOf } from '/src/lib/video/diff.ts';
+
+      const ALL = new Set(['developer','personal','financial','network']);
+      const out = document.querySelector('#out');
+
+      function lcs(a,b){ if(!a||!b||b.length>4000) return false; let p=new Uint16Array(b.length+1),c=new Uint16Array(b.length+1);
+        for(let i=1;i<=a.length;i++){for(let j=1;j<=b.length;j++)c[j]=a[i-1]===b[j-1]?p[j-1]+1:Math.max(p[j],c[j-1]);[p,c]=[c,p];c.fill(0);} return p[b.length]>=a.length*0.7; }
+
+      async function recall(pool, canvas, scale) {
+        const hits = [];
+        const r = await pool.recognize(canvas, scale);
+        for (const l of r.lines) { const b = buildLine(l.words); if (!b.text.trim()) continue;
+          for (const m of scanLine(b.text, ALL)) hits.push(m.value); }
+        return EXPECTED_SECRETS.filter(s => hits.some(h => lcs(s.needle,h) || lcs(h,s.needle))).length;
+      }
+
+      document.querySelector('#run').addEventListener('click', async () => {
+        const editor = renderEditor();
+        const pool = new OcrPool(); await pool.init();
+        const rows = [];
+        try {
+          // A clean 1280x720 capture, with the editor drawn at shrinking scale —
+          // exactly a screen recording of a smaller and smaller font.
+          for (const fontScale of [1.0, 0.85, 0.7, 0.6, 0.5, 0.42, 0.35]) {
+            out.textContent = 'font scale ' + fontScale;
+            const W = 1280, H = 720;
+            const frame = Object.assign(document.createElement('canvas'), { width: W, height: H });
+            const ctx = frame.getContext('2d', { alpha: false });
+            ctx.fillStyle = '#1e1e1e'; ctx.fillRect(0,0,W,H);
+            ctx.drawImage(editor, 0, 0, editor.width*fontScale, editor.height*fontScale);
+
+            const L = analyseTextLayout(frame, W, H);
+            const base = ocrScaleFor(W, H);
+            const bc = Object.assign(document.createElement('canvas'), { width: Math.round(W*base), height: Math.round(H*base) });
+            const bctx = bc.getContext('2d',{alpha:false});
+            bctx.filter = meanLuma(signatureOf(frame)) < 110 ? 'invert(1)' : 'none';
+            bctx.drawImage(frame, 0, 0, bc.width, bc.height); bctx.filter = 'none';
+
+            const v = buildView(frame, L, { invert: L.dark });
+            rows.push({
+              fontScale, pitch: +L.linePitch.toFixed(1), eff: +(L.linePitch*base).toFixed(1),
+              gate: needsRebuild(L),
+              baseline: await recall(pool, bc, base),
+              rebuilt: v ? await recall(pool, v.canvas, 1) : 0,
+            });
+            render(rows);
+          }
+        } finally { await pool.terminate(); }
+        window.__cal = rows; out.textContent = 'done';
+      });
+
+      function render(rows) {
+        const n = EXPECTED_SECRETS.length;
+        const cls = v => v >= n-1 ? 'good' : v >= 2 ? 'mid' : 'bad';
+        document.querySelector('#table').innerHTML =
+          '<table><tr><th>font scale</th><th>pitch</th><th>effective pitch</th><th>gate fires</th><th>baseline</th><th>rebuilt</th></tr>' +
+          rows.map(r => `<tr><td>${r.fontScale}</td><td>${r.pitch}</td><td>${r.eff}</td><td>${r.gate}</td>
+            <td class=${cls(r.baseline)}>${r.baseline}/${n}</td><td class=${cls(r.rebuilt)}>${r.rebuilt}/${n}</td></tr>`).join('') + '</table>';
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>attached face probe</title>
+    <style>
+      body { background:#0b0d13; color:#e6e9ef; font:13px ui-monospace,Menlo,monospace; padding:16px; }
+      canvas { max-width:100%; border:1px solid #38404f; display:block; margin-top:12px; }
+      pre { white-space:pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <label>Frame <input id="file" type="file" accept="image/*" /></label>
+    <pre id="out">choose the attached screenshot…</pre>
+    <canvas id="view"></canvas>
+    <script type="module">
+      import { initFaceDetector, detectFaces } from '/src/lib/vision/faces.ts';
+
+      const file = document.querySelector('#file');
+      const out = document.querySelector('#out');
+      const view = document.querySelector('#view');
+      const say = (value) => { out.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2); };
+      const modes = [
+        ['frame-only', 9999],
+        ['no-tiles', 300],
+        ['default-64px', 64],
+        ['larger-128px', 128],
+      ];
+
+      file.addEventListener('change', async () => {
+        const f = file.files?.[0];
+        if (!f) return;
+        // A backgrounded tab never resolves img.decode(); createImageBitmap works.
+        const img = await createImageBitmap(f);
+        view.width = img.width;
+        view.height = img.height;
+        const ctx = view.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        say('loading face model…');
+        const detector = await initFaceDetector();
+        if (!detector) { say('face detector unavailable'); return; }
+        const results = {};
+        for (const [name, minFacePx] of modes) {
+          const hits = detectFaces(view, view.width, view.height, { minFacePx });
+          results[name] = hits.map((h) => ({
+            confidence: +h.confidence.toFixed(4),
+            box: Object.fromEntries(Object.entries(h.box).map(([k, v]) => [k, +v.toFixed(1)])),
+          }));
+        }
+        ctx.lineWidth = 4;
+        const colors = ['#5b8cff', '#ffd166', '#ff4d4d', '#69db7c'];
+        for (const [i, [name]] of modes.entries()) {
+          ctx.strokeStyle = colors[i];
+          for (const h of results[name]) ctx.strokeRect(h.box.x, h.box.y, h.box.w, h.box.h);
+        }
+        say({ size: [view.width, view.height], modes, results });
+        window.__faceProbe = { size: [view.width, view.height], results };
+      });
+    </script>
+  </body>
+</html>

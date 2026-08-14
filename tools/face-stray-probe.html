@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>face stray probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:16px">
+    <div id="out" style="white-space:pre-wrap">running…</div>
+    <div id="sheet" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px"></div>
+    <script type="module">
+      /*
+       * Every box each search mode reports, with its size and confidence, so a
+       * box that sits on nothing can be traced to the pass that produced it.
+       * "0.35 stray boxes per frame" is not something you can act on until you
+       * know whether they come from the full frame or from a tile, and how
+       * confident they were.
+       *
+       * The largest, most confident box in the frame is taken as the face;
+       * anything not touching it is a stray.
+       *
+       *   ?clip=vlog-b.mov&modes=frame,micro&max=60
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { initFaceDetector, detectFaces } from '/src/lib/vision/faces.ts';
+
+      const q = new URLSearchParams(location.search);
+      const CLIP = q.get('clip') ?? 'vlog-b.mov';
+      const MODES = (q.get('modes') ?? 'frame,deep,micro').split(',');
+      const MAX = Number(q.get('max') ?? 60);
+      const SHOW = Number(q.get('show') ?? 8);
+
+      const out = document.getElementById('out');
+      const sheet = document.getElementById('sheet');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const iou = (a, b) => {
+        const w = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+        const h = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+        const inter = w * h, union = a.w * a.h + b.w * b.h - inter;
+        return union > 0 ? inter / union : 0;
+      };
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/testdata/' + CLIP)).blob();
+        const v = await loadVideo(new File([blob], CLIP, { type: 'video/quicktime' }));
+        await initFaceDetector();
+        const grab = createGrabber(v.width, v.height);
+        say(`${CLIP} ${v.width}x${v.height}\n`);
+
+        const stats = Object.fromEntries(MODES.map((m) => [m, { strays: [], frames: 0 }]));
+        let shown = 0;
+
+        for (let i = 0; i < MAX; i++) {
+          const t = i * 0.5;
+          if (t >= v.duration) break;
+          await seekTo(v.el, t);
+          grab.grab(v.el);
+
+          const byMode = {};
+          for (const mode of MODES) byMode[mode] = detectFaces(grab.canvas, v.width, v.height, { minFacePx: Number(mode) });
+
+          // The face: biggest box the plain full-frame pass is sure about.
+          const base = [...(byMode[MODES[0]] ?? [])].sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h)[0];
+          if (!base) continue;
+
+          let reported = false;
+          for (const mode of MODES) {
+            stats[mode].frames++;
+            for (const f of byMode[mode]) {
+              if (iou(f.box, base.box) > 0) continue;
+              stats[mode].strays.push({ t: +t.toFixed(1), conf: f.confidence, box: f.box });
+              if (!reported) {
+                say(`  t=${t.toFixed(1)}s  face ${Math.round(base.box.w)}x${Math.round(base.box.h)} conf ${base.confidence.toFixed(2)}`);
+                reported = true;
+              }
+              say(`      ${mode.padEnd(6)} STRAY ${Math.round(f.box.w)}x${Math.round(f.box.h)}` +
+                  ` (${((f.box.w * f.box.h) / (base.box.w * base.box.h)).toFixed(2)}x the face)` +
+                  ` conf ${f.confidence.toFixed(2)} at ${Math.round(f.box.x)},${Math.round(f.box.y)}`);
+            }
+          }
+
+          if (reported && shown < SHOW) {
+            const c = document.createElement('canvas');
+            c.width = 320; c.height = Math.round((320 * v.height) / v.width);
+            const cx = c.getContext('2d');
+            cx.drawImage(grab.canvas, 0, 0, c.width, c.height);
+            const k = c.width / v.width;
+            cx.lineWidth = 2;
+            for (const [mi, mode] of MODES.entries()) {
+              cx.strokeStyle = ['#5b8cff', '#ffa657', '#ff4d4d'][mi % 3];
+              for (const f of byMode[mode]) cx.strokeRect(f.box.x * k + mi, f.box.y * k + mi, f.box.w * k, f.box.h * k);
+            }
+            cx.fillStyle = '#000c'; cx.fillRect(0, 0, 52, 14);
+            cx.fillStyle = '#fff'; cx.font = '11px monospace'; cx.fillText(`${t.toFixed(1)}s`, 3, 11);
+            sheet.appendChild(c);
+            shown++;
+          }
+        }
+
+        say('');
+        for (const mode of MODES) {
+          const s = stats[mode].strays;
+          const confs = s.map((x) => x.conf).sort((a, b) => a - b);
+          say(`${mode.padEnd(6)} ${String(s.length).padStart(3)} strays in ${stats[mode].frames} frames` +
+              `  conf ${confs.length ? `${confs[0].toFixed(2)}–${confs.at(-1).toFixed(2)}` : 'n/a'}` +
+              `  [${confs.map((c) => c.toFixed(2)).join(' ')}]`);
+        }
+        window.__strays = stats;
+        window.__done = true;
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__done = true;
+      }
+    </script>
+  </body>
+</html>

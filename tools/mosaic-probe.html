@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>mosaic strength probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:16px">
+    <div id="out" style="white-space:pre-wrap">running…</div>
+    <div id="sheet" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px"></div>
+    <script type="module">
+      /*
+       * Is a redacted face actually anonymous?
+       *
+       * The only honest test of a redaction is to look at the output, so this
+       * paints the real redaction over a real detected face at a range of cell
+       * counts and shows them side by side. "Destructive mosaic" is a claim
+       * about pixels; this is the pixels.
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { initFaceDetector, detectFaces, isEstablishedFace } from '/src/lib/vision/faces.ts';
+      import { dilate } from '/src/lib/video/redact.ts';
+
+      const q = new URLSearchParams(location.search);
+      const CLIP = q.get('clip') ?? 'vlog-b.mov';
+      const T = Number(q.get('t') ?? 20);
+      const out = document.getElementById('out');
+      const sheet = document.getElementById('sheet');
+      const say = (s = '') => (out.textContent += s + '\n');
+
+      /** The shipped mosaic, with the cell count as a parameter so it can be swept. */
+      function mosaic(ctx, box, cells, frameW, frameH) {
+        const bx = Math.max(0, Math.floor(box.x));
+        const by = Math.max(0, Math.floor(box.y));
+        const bw = Math.min(frameW - bx, Math.ceil(box.w));
+        const bh = Math.min(frameH - by, Math.ceil(box.h));
+        if (bw < 2 || bh < 2) return 0;
+        const block = cells === 'old' ? Math.max(6, Math.min(bh, 28) / 2.2)
+                                      : Math.max(6, Math.max(bw, bh) / cells);
+        const sw = Math.max(1, Math.round(bw / block));
+        const sh = Math.max(1, Math.round(bh / block));
+        const tmp = new OffscreenCanvas(sw, sh);
+        const tctx = tmp.getContext('2d', { alpha: false });
+        tctx.imageSmoothingEnabled = true;
+        tctx.drawImage(ctx.canvas, bx, by, bw, bh, 0, 0, sw, sh);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tmp, 0, 0, sw, sh, bx, by, bw, bh);
+        ctx.imageSmoothingEnabled = true;
+        return `${sw}x${sh}`;
+      }
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/testdata/' + CLIP)).blob();
+        const v = await loadVideo(new File([blob], CLIP, { type: 'video/quicktime' }));
+        await initFaceDetector();
+        const grab = createGrabber(v.width, v.height);
+        await seekTo(v.el, T);
+        grab.grab(v.el);
+        const faces = detectFaces(grab.canvas, v.width, v.height).filter((f) => isEstablishedFace(f.confidence));
+        say(`${CLIP} @${T}s — ${faces.length} face(s), box ${faces[0] ? Math.round(faces[0].box.w) + 'x' + Math.round(faces[0].box.h) : 'n/a'}`);
+        if (!faces.length) throw new Error('no face at this timestamp');
+
+        for (const setting of ['old', 15, 13, 12, 9, 6, 3]) {
+          const c = document.createElement('canvas');
+          c.width = v.width; c.height = v.height;
+          const cx = c.getContext('2d', { alpha: false });
+          cx.drawImage(grab.canvas, 0, 0);
+          let cells = '';
+          for (const f of faces) cells = mosaic(cx, dilate(f.box, v.width, v.height), setting, v.width, v.height);
+
+          // Objective check to go with the eyeball one: if the detector can
+          // still find a face in the redacted pixels, the redaction failed.
+          const still = detectFaces(c, v.width, v.height).filter((f) => isEstablishedFace(f.confidence));
+          const verdict = still.length
+            ? `STILL DETECTABLE (${still.map((s) => s.confidence.toFixed(2)).join(',')})`
+            : 'no face found in the output';
+
+          // Crop to the face so the comparison is actually legible.
+          const b = dilate(faces[0].box, v.width, v.height);
+          const pad = 60;
+          const view = document.createElement('canvas');
+          view.width = 260;
+          view.height = Math.round((260 * (b.h + pad * 2)) / (b.w + pad * 2));
+          const vx = view.getContext('2d');
+          vx.drawImage(c, Math.max(0, b.x - pad), Math.max(0, b.y - pad), b.w + pad * 2, b.h + pad * 2,
+                       0, 0, view.width, view.height);
+          vx.fillStyle = '#000c'; vx.fillRect(0, 0, 150, 15);
+          vx.fillStyle = '#fff'; vx.font = '11px monospace';
+          vx.fillText(`${setting === 'old' ? 'SHIPPED (old)' : setting + ' cells'} -> ${cells}${still.length ? ' DETECTABLE' : ''}`, 3, 11);
+          sheet.appendChild(view);
+          say(`  ${String(setting).padEnd(6)} -> ${String(cells).padEnd(7)} cells kept   ${verdict}`);
+        }
+        window.__done = true;
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__done = true;
+      }
+    </script>
+  </body>
+</html>

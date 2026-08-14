@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>normal recording regression</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * The deskew path must be invisible to the case the app was built for.
+       *
+       * A normal screen recording is captured from the framebuffer: upright text
+       * at a readable size, which the whole-frame pass already handles. If the
+       * rebuild gate fires here it is a false positive that doubles every scan,
+       * and if the findings change at all the recovery work has damaged the
+       * thing that already worked.
+       */
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const video = await loadVideo(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));
+        say(`SOURCE  ${video.width}x${video.height} ${video.duration.toFixed(2)}s`);
+
+        const t0 = performance.now();
+        const res = await scanVideo(video, { categories: CATS, sampleFps: 2 });
+        const secs = ((performance.now() - t0) / 1000).toFixed(1);
+
+        say(`\n${res.findings.length} findings in ${secs}s`);
+        say(`analyzed ${res.stats.analyzed} · skipped ${res.stats.skipped} · REBUILT ${res.stats.rebuilt}`);
+        say('');
+        for (const f of res.findings) {
+          say(`  ${f.severity.padEnd(8)} ${f.label.padEnd(28)} ${f.start.toFixed(1)}-${f.end.toFixed(1)}s  ${f.masked}`);
+        }
+
+        say('\n' + '='.repeat(62));
+        say(res.stats.rebuilt === 0
+          ? `PASS — the rebuild never fired on a normal recording. No added cost.`
+          : `FAIL — the rebuild fired on ${res.stats.rebuilt} of ${res.stats.analyzed} frames of a normal recording.`);
+        say('='.repeat(62));
+        window.__regression = {
+          findings: res.findings.length,
+          rebuilt: res.stats.rebuilt,
+          analyzed: res.stats.analyzed,
+          seconds: +secs,
+          labels: res.findings.map((f) => `${f.detectorId}:${f.masked}`),
+        };
+      } catch (e) {
+        say('\nERROR: ' + (e?.stack ?? e));
+        window.__regression = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

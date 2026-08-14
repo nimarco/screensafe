@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" /><title>homography ceiling</title>
+    <style>
+      body { background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px; }
+      table { border-collapse:collapse;margin-top:12px; }
+      td,th { border:1px solid #38404f;padding:4px 10px;text-align:left; }
+      th { background:#171b24; }
+      .good{color:#5ddc9a}.bad{color:#ff7b72}.mid{color:#e3b341}
+      button { background:#1f6feb;color:#fff;border:0;padding:6px 12px;border-radius:4px;cursor:pointer; }
+    </style>
+  </head>
+  <body>
+    <button id="run">run</button>
+    <pre id="out">idle</pre>
+    <div id="table"></div>
+    <script type="module">
+      /*
+       * Is a four-corner homography worth building?
+       *
+       * Deskewing recovers every secret at a 7° tilt and loses most of them by
+       * 14°. The open question is *why* the steep end fails: because a single
+       * rotation cannot undo converging baselines — which a homography would
+       * fix — or because the far side of the screen is so foreshortened that the
+       * glyphs no longer carry enough pixels, which no warp can fix.
+       *
+       * The fixture knows exactly where it put the screen's four corners, so the
+       * perfect unwarp can be applied directly. That is the ceiling: whatever a
+       * real corner-detector could achieve, it cannot beat this. Measuring it
+       * first means the decision to build the estimator is made on evidence
+       * rather than on the assumption that perspective is the whole story.
+       */
+      import { simulatePhoto, solveHomography, EXPECTED_SECRETS } from '/tools/photo-sim.js';
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { analyseTextLayout, buildView } from '/src/lib/ocr/preprocess.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+
+      const ALL = new Set(['developer','personal','financial','network']);
+      const out = document.querySelector('#out');
+
+      function lcs(a,b){ if(!a||!b||b.length>4000) return false; let p=new Uint16Array(b.length+1),c=new Uint16Array(b.length+1);
+        for(let i=1;i<=a.length;i++){for(let j=1;j<=b.length;j++)c[j]=a[i-1]===b[j-1]?p[j-1]+1:Math.max(p[j],c[j-1]);[p,c]=[c,p];c.fill(0);} return p[b.length]>=a.length*0.7; }
+
+      /** Ground-truth unwarp: map the known screen quad back onto a full rect. */
+      function rectify(source, quad, outW, outH) {
+        // rect -> quad, applied forward per output pixel, which is the correct
+        // inverse mapping for resampling (every output pixel gets a source).
+        const H = solveHomography([[0,0],[outW,0],[outW,outH],[0,outH]], quad);
+        const sw = source.width, sh = source.height;
+        const sdata = source.getContext('2d',{alpha:false}).getImageData(0,0,sw,sh).data;
+        const o = Object.assign(document.createElement('canvas'), { width: outW, height: outH });
+        const octx = o.getContext('2d',{alpha:false});
+        const odata = octx.getImageData(0,0,outW,outH), d = odata.data;
+        for (let y=0;y<outH;y++) for (let x=0;x<outW;x++) {
+          const w = H[6]*x + H[7]*y + H[8];
+          if (Math.abs(w) < 1e-12) continue;
+          const sx = (H[0]*x + H[1]*y + H[2]) / w;
+          const sy = (H[3]*x + H[4]*y + H[5]) / w;
+          if (sx<0||sy<0||sx>=sw-1||sy>=sh-1) continue;
+          const x0=sx|0, y0=sy|0, fx=sx-x0, fy=sy-y0;
+          const i00=(y0*sw+x0)*4, i10=i00+4, i01=i00+sw*4, i11=i01+4, di=(y*outW+x)*4;
+          for (let ch=0;ch<3;ch++) {
+            const top = sdata[i00+ch]*(1-fx) + sdata[i10+ch]*fx;
+            const bot = sdata[i01+ch]*(1-fx) + sdata[i11+ch]*fx;
+            d[di+ch] = top*(1-fy) + bot*fy;
+          }
+          d[di+3]=255;
+        }
+        octx.putImageData(odata,0,0);
+        // Same inversion the rebuild applies, so the comparison is like for like.
+        const inv = Object.assign(document.createElement('canvas'), { width: outW, height: outH });
+        const ictx = inv.getContext('2d',{alpha:false});
+        ictx.filter='invert(1)'; ictx.drawImage(o,0,0); ictx.filter='none';
+        return inv;
+      }
+
+      async function recall(pool, canvas) {
+        const hits = [];
+        const r = await pool.recognize(canvas, 1);
+        for (const l of r.lines) { const b = buildLine(l.words); if (!b.text.trim()) continue;
+          for (const m of scanLine(b.text, ALL)) hits.push(m.value); }
+        return EXPECTED_SECRETS.filter(s => hits.some(h => lcs(s.needle,h)||lcs(h,s.needle))).length;
+      }
+
+      const SETUPS = [
+        { name: 'typical  rot -7  key 0.05', rotateDeg:-7,  keystone:0.05 },
+        { name: 'steep    rot -11 key 0.12', rotateDeg:-11, keystone:0.12 },
+        { name: 'harsh    rot -14 key 0.20', rotateDeg:-14, keystone:0.20 },
+        { name: 'extreme  rot -18 key 0.30', rotateDeg:-18, keystone:0.30 },
+      ];
+
+      document.querySelector('#run').addEventListener('click', async () => {
+        const pool = new OcrPool(); await pool.init();
+        const rows = [];
+        try {
+          for (const s of SETUPS) {
+            out.textContent = 'running ' + s.name;
+            const { canvas, corners, editor } = await simulatePhoto(s);
+            const layout = analyseTextLayout(canvas, canvas.width, canvas.height);
+            const v = buildView(canvas, layout, { invert: layout.dark });
+            const shipped = v ? await recall(pool, v.canvas) : 0;
+            const W = Math.round(editor.width * 1.7), H = Math.round(editor.height * 1.7);
+            const perfect = await recall(pool, rectify(canvas, corners, W, H));
+            rows.push({ name: s.name, skew:+layout.skewDeg.toFixed(2), shipped, perfect });
+            render(rows);
+          }
+        } finally { await pool.terminate(); }
+        window.__ceiling = rows; out.textContent = 'done';
+      });
+
+      function render(rows) {
+        const n = EXPECTED_SECRETS.length;
+        const cls = v => v>=n-1?'good':v>=2?'mid':'bad';
+        document.querySelector('#table').innerHTML =
+          '<table><tr><th>setup</th><th>measured skew</th><th>shipped (deskew only)</th><th>ceiling (perfect homography)</th><th>headroom</th></tr>' +
+          rows.map(r=>`<tr><td>${r.name}</td><td>${r.skew}°</td><td class=${cls(r.shipped)}>${r.shipped}/${n}</td>
+            <td class=${cls(r.perfect)}>${r.perfect}/${n}</td><td>${r.perfect-r.shipped>0?'+'+(r.perfect-r.shipped):r.perfect-r.shipped}</td></tr>`).join('')+'</table>';
+      }
+    </script>
+  </body>
+</html>
