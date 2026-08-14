@@ -30,6 +30,18 @@ export function entropy(s: string): number {
 }
 
 /**
+ * Values people type when they are deliberately *not* writing a secret.
+ *
+ * Shared rather than inlined because more than one rule has to agree on it: a
+ * tutorial's `API_KEY=your_api_key_here` should be silent whether it is being
+ * judged as a live credential or as a secret-named assignment, and two copies
+ * of this list would eventually disagree.
+ */
+export function isPlaceholderValue(s: string): boolean {
+  return /^(your|my|the|some|test|example|placeholder|changeme|hunter2|xxx+|todo|fixme|null|none|undefined)/i.test(s);
+}
+
+/**
  * Rejects strings that read like English/code identifiers rather than secrets.
  * Generic token rules lean on this so `API_KEY=your_api_key_here` in a tutorial
  * does not get flagged as a live credential.
@@ -37,10 +49,7 @@ export function entropy(s: string): number {
 export function looksRandom(s: string, minEntropy = 3.0): boolean {
   if (s.length < 12) return false;
   if (entropy(s) < minEntropy) return false;
-  // Placeholder values people actually type in demos.
-  if (/^(your|my|the|some|test|example|placeholder|changeme|xxx+|todo|fixme|null|none|undefined)/i.test(s)) {
-    return false;
-  }
+  if (isPlaceholderValue(s)) return false;
   if (/^[a-z]+(_[a-z]+)*$/.test(s)) return false; // snake_case words
   const hasDigit = /[0-9]/.test(s);
   const hasUpper = /[A-Z]/.test(s);

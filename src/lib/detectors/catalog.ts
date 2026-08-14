@@ -1,5 +1,12 @@
 import type { CategoryId, Severity } from '../types';
-import { isPrivateIPv4, isValidIPv4, looksLikeVersionString, looksRandom, luhn } from './validators';
+import {
+  isPlaceholderValue,
+  isPrivateIPv4,
+  isValidIPv4,
+  looksLikeVersionString,
+  looksRandom,
+  luhn,
+} from './validators';
 
 export interface DetectorDef {
   id: string;
@@ -52,8 +59,70 @@ function maskCard(value: string): string {
 }
 
 function maskUrl(value: string): string {
-  // Keep the scheme + host shape, destroy the credentials inside it.
-  return value.replace(/\/\/([^@/]+)@/, `//${DOT.repeat(8)}@`).slice(0, 48);
+  // Keep only the scheme and host shape. Credentials may live in userinfo,
+  // query parameters, paths, or OCR-mangled variants of those fields; keeping
+  // the suffix would make a connection string itself a second secret leak in
+  // the review queue.
+  const m = value.match(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)([^/?#\s]+)(.*)$/);
+  if (!m) return keepEnds(value, 3, 3);
+
+  const authority = m[2];
+  const at = authority.lastIndexOf('@');
+  let safeAuthority: string;
+  if (at >= 0) {
+    safeAuthority = `${DOT.repeat(8)}@${authority.slice(at + 1)}`;
+  } else if (authority.includes(':') && !/^(?:\[[^\]]+\]|[^:]+):\d+$/.test(authority)) {
+    // An authority containing a non-port colon may be an OCR-truncated
+    // user:password pair without its @host tail. Hide it rather than guessing.
+    safeAuthority = DOT.repeat(8);
+  } else {
+    safeAuthority = authority;
+  }
+  return `${m[1]}${safeAuthority}${m[3] ? '…' : ''}`.slice(0, 48);
+}
+
+/* --------------------------------------------------- secret-named values */
+
+/**
+ * Names that announce a credential.
+ *
+ * `[_-]KEY` is the one worth explaining. The list used to require the word to
+ * be spelled out — API_KEY, ACCESS_KEY, PRIVATE_KEY — which quietly excluded the
+ * single most common way a live credential is named in a real project:
+ * SUPABASE_ANON_KEY, ENCRYPTION_KEY, SIGNING_KEY, PUBLISHABLE_KEY. A `_KEY`
+ * suffix is enough. The lookahead is what keeps it honest: KEYBOARD_LAYOUT and
+ * MY_KEYBOARD do not get to be secrets on a technicality.
+ */
+const SECRET_NAME =
+  '[A-Za-z0-9_.\\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|APIKEY|API[_-]KEY|PRIVATE[_-]KEY|ACCESS[_-]KEY|CLIENT[_-]SECRET|CREDENTIALS?|[_-]KEY(?![A-Za-z0-9]))[A-Za-z0-9_.\\-]*';
+
+/** The bar a value must clear to be treated as a live credential. */
+function looksLikeLiveSecret(value: string): boolean {
+  return looksRandom(value, 2.6) || value.length >= 20;
+}
+
+/** Config values that are settings rather than secrets, whatever the name says. */
+function isSettingValue(value: string): boolean {
+  return /^(true|false|null|nil|none|undefined|off|on|yes|no|\d+(\.\d+)?)$/i.test(value);
+}
+
+/**
+ * A value that is the *name* of a secret rather than one.
+ *
+ * `new OpenAI({ apiKey: OPENAI_KEY })` assigns a secret-shaped name to a
+ * secret-shaped name, and every part of the generic rule fires on it. Code
+ * passes credentials around by reference constantly, so without this the rule
+ * flags the plumbing on every line that touches a key. A SCREAMING_SNAKE token
+ * is an identifier in every language worth scanning; a credential almost never
+ * is, because the alphabets that generate them are mixed-case or hex.
+ *
+ * Digits are allowed in the leading run for a reason that is not cosmetic: the
+ * confusable-folding variant rewrites `O` to `0` before matching, so the string
+ * this sees may well be `0PENAI_KEY`. Anchoring on a letter would let exactly
+ * the case that motivated the rule slip past it.
+ */
+function isIdentifierReference(value: string): boolean {
+  return /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/.test(value) && /[A-Z]/.test(value);
 }
 
 /* ------------------------------------------------------------- detectors */
@@ -111,7 +180,13 @@ export const DETECTORS: DetectorDef[] = [
     label: 'Google API key',
     category: 'developer',
     severity: 'critical',
-    pattern: /\b(AIza[A-Za-z0-9_\-]{30,40})\b/gd,
+    // No trailing \b. A real key is 39 characters, but the moment OCR splices a
+    // character in — or someone types a longer placeholder — a bounded run
+    // followed by a boundary can never match: every length in the range lands
+    // mid-token, so the engine backtracks through all of them and gives up.
+    // Matching the first 40 characters of an over-long token is the right
+    // failure: extendOverFragments covers the tail when the box is drawn.
+    pattern: /\b(AIza[A-Za-z0-9_\-]{30,40})/gd,
     mask: (v) => keepEnds(v, 4, 4),
     hint: 'Billable Google Cloud / Maps / Firebase access.',
   },
@@ -236,12 +311,40 @@ export const DETECTORS: DetectorDef[] = [
     category: 'developer',
     severity: 'critical',
     // KEY-ish name, then an assignment, then something that looks random.
-    pattern:
-      /\b([A-Za-z0-9_.\-]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API[_-]KEY|PRIVATE[_-]KEY|ACCESS[_-]KEY|CLIENT[_-]SECRET|CREDENTIAL)[A-Za-z0-9_.\-]*)\s*[:=]\s*["']?([^\s"',;]{8,})/gid,
+    pattern: new RegExp(`\\b(${SECRET_NAME})\\s*[:=]\\s*["']?([^\\s"',;]{8,})`, 'gid'),
     group: 2,
-    validate: (v) => looksRandom(v, 2.6) || v.length >= 20,
+    validate: (v) => looksLikeLiveSecret(v),
     mask: (v) => keepEnds(v, 3, 3),
     hint: 'A value assigned to a secret-looking name.',
+  },
+  {
+    id: 'secret-assignment',
+    label: 'Secret-named value',
+    category: 'developer',
+    // Deliberately not critical. The name says credential but the value does
+    // not read like one, and the two most likely explanations pull in opposite
+    // directions: it is a placeholder in a demo, or it is a real secret that OCR
+    // mangled or that is simply short and memorable. Dropping the line — which
+    // is what happened before this rule existed — silently picks the first
+    // reading. Surfacing it at medium puts the choice in front of the reviewer,
+    // where it belongs, without crying wolf in a queue sorted by severity.
+    severity: 'medium',
+    pattern: new RegExp(`\\b(${SECRET_NAME})\\s*[:=]\\s*["']?([^\\s"',;]{4,})`, 'gid'),
+    group: 2,
+    // Four exclusions, and each earns its place. A value the tutorial
+    // vocabulary already claims is a placeholder by intent, not by accident. A
+    // setting is a setting whatever the name suggests. An identifier is code
+    // moving a secret around, not the secret. And a bare lowercase word —
+    // `hello`, `secret` — is prose or a demo, never a credential; requiring a
+    // digit, underscore, dot or dash is what separates `whsec_fake` from it.
+    validate: (v) =>
+      !looksLikeLiveSecret(v) &&
+      !isSettingValue(v) &&
+      !isPlaceholderValue(v) &&
+      !isIdentifierReference(v) &&
+      /[0-9_.\-]/.test(v),
+    mask: (v) => keepEnds(v, 2, 2),
+    hint: 'Named like a credential, but the value looks like a placeholder. Worth a look before publishing.',
   },
 
   /* ---------------------------------------------------- personal info */

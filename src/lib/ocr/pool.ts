@@ -19,6 +19,28 @@ export interface OcrResult {
   lines: OcrLineResult[];
 }
 
+/**
+ * Page segmentation modes we actually use.
+ *
+ * AUTO runs full layout analysis, which is right for a screenshot and is what
+ * finds columns, panes and gutters. It is also the part that gives up entirely
+ * on a photographed screen: no block found, no text returned. SPARSE_TEXT skips
+ * layout and hunts for words wherever they are, which recovers a rebuilt view
+ * even when the rebuild left some skew behind.
+ */
+export const OCR_PSM = {
+  auto: PSM.AUTO,
+  sparse: PSM.SPARSE_TEXT,
+  block: PSM.SINGLE_BLOCK,
+} as const;
+
+export type OcrMode = keyof typeof OCR_PSM;
+
+export interface RecognizeOptions {
+  /** Layout strategy. Defaults to `auto`, the pool's initialised mode. */
+  mode?: OcrMode;
+}
+
 function workerCount(): number {
   const cores = navigator.hardwareConcurrency || 4;
   // Each worker carries its own ~7MB core plus a 4MB language model, so this
@@ -46,7 +68,7 @@ function toBox(b: TessBBox, scale: number): Box {
 export class OcrPool {
   private workers: Worker[] = [];
   private idle: Worker[] = [];
-  private queue: Array<(w: Worker) => void> = [];
+  private queue: Array<{ resolve: (w: Worker) => void; reject: (err: unknown) => void }> = [];
   private ready: Promise<void> | null = null;
 
   async init(onProgress?: (loaded: number, total: number) => void): Promise<void> {
@@ -54,21 +76,35 @@ export class OcrPool {
     const n = workerCount();
     let loaded = 0;
     this.ready = (async () => {
-      const made = await Promise.all(
-        Array.from({ length: n }, async () => {
-          const w = await createWorker('eng', 1, TESS_OPTS);
-          await w.setParameters({
-            tessedit_pageseg_mode: PSM.AUTO,
-            preserve_interword_spaces: '1',
-            user_defined_dpi: '96',
-          });
-          onProgress?.(++loaded, n);
-          return w;
-        }),
-      );
-      this.workers = made;
-      this.idle = [...made];
-      this.flush();
+      const created: Worker[] = [];
+      try {
+        const made = await Promise.all(
+          Array.from({ length: n }, async () => {
+            const w = await createWorker('eng', 1, TESS_OPTS);
+            created.push(w);
+            await w.setParameters({
+              tessedit_pageseg_mode: PSM.AUTO,
+              preserve_interword_spaces: '1',
+              user_defined_dpi: '96',
+            });
+            onProgress?.(++loaded, n);
+            return w;
+          }),
+        );
+        this.workers = made;
+        this.idle = [...made];
+        this.flush();
+      } catch (err) {
+        // Promise.all can reject after another worker has already been
+        // created. Dispose every partial worker or a failed/aborted scan leaves
+        // Tesseract threads alive in the tab.
+        await Promise.all(created.map((w) => w.terminate().catch(() => {})));
+        this.workers = [];
+        this.idle = [];
+        this.queue = [];
+        this.ready = null;
+        throw err;
+      }
     })();
     return this.ready;
   }
@@ -76,16 +112,20 @@ export class OcrPool {
   private flush() {
     while (this.queue.length && this.idle.length) {
       const take = this.queue.shift()!;
-      take(this.idle.pop()!);
+      take.resolve(this.idle.pop()!);
     }
   }
 
   private acquire(): Promise<Worker> {
     if (this.idle.length) return Promise.resolve(this.idle.pop()!);
-    return new Promise((resolve) => this.queue.push(resolve));
+    return new Promise((resolve, reject) => this.queue.push({ resolve, reject }));
   }
 
   private release(w: Worker) {
+    if (!this.workers.includes(w)) {
+      void w.terminate().catch(() => {});
+      return;
+    }
     this.idle.push(w);
     this.flush();
   }
@@ -96,12 +136,21 @@ export class OcrPool {
 
   /**
    * Recognise one frame. `scale` is the factor the bitmap was upscaled by, so
-   * boxes come back in original video pixel coordinates.
+   * boxes come back in original video pixel coordinates. Pass `scale: 1` when
+   * the caller owns a richer transform and will map the boxes itself.
    */
-  async recognize(bitmap: ImageBitmap | HTMLCanvasElement | OffscreenCanvas, scale: number): Promise<OcrResult> {
+  async recognize(
+    bitmap: ImageBitmap | HTMLCanvasElement | OffscreenCanvas,
+    scale: number,
+    opts: RecognizeOptions = {},
+  ): Promise<OcrResult> {
     await this.init();
     const w = await this.acquire();
+    const mode = opts.mode ?? 'auto';
     try {
+      // The worker is held exclusively for this call, so a non-default mode can
+      // be set and put back without another job ever seeing it.
+      if (mode !== 'auto') await w.setParameters({ tessedit_pageseg_mode: OCR_PSM[mode] });
       const res = await w.recognize(bitmap as Parameters<Worker['recognize']>[0], {}, { blocks: true });
       const lines: OcrLineResult[] = [];
       const blocks = (res.data as { blocks?: unknown[] }).blocks ?? [];
@@ -126,6 +175,9 @@ export class OcrPool {
       }
       return { lines };
     } finally {
+      if (mode !== 'auto') {
+        await w.setParameters({ tessedit_pageseg_mode: OCR_PSM.auto }).catch(() => {});
+      }
       this.release(w);
     }
   }
@@ -134,8 +186,11 @@ export class OcrPool {
     const ws = this.workers;
     this.workers = [];
     this.idle = [];
+    const queued = this.queue;
     this.queue = [];
     this.ready = null;
+    const err = new Error('OCR pool terminated.');
+    for (const take of queued) take.reject(err);
     await Promise.all(ws.map((w) => w.terminate().catch(() => {})));
   }
 }

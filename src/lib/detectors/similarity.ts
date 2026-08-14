@@ -1,4 +1,4 @@
-/** Levenshtein distance, abandoned once it exceeds `cap`. */
+/** Levenshtein distance, stopping once it exceeds cap. */
 export function editDistance(a: string, b: string, cap: number): number {
   if (Math.abs(a.length - b.length) > cap) return cap + 1;
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
@@ -23,8 +23,8 @@ const alnum = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
  * Are two OCR reads plausibly the same secret?
  *
  * Used to collapse duplicate findings. Exact containment is too brittle: the
- * same key comes back as `sk_lLive_51Qj` from a half-drawn frame and
- * `sk_live_510Qjs...` once it settles, and a stray period turns `NoP.qRs` into
+ * same key comes back with a split vendor prefix from a half-drawn frame and
+ * settles into one value later, while a stray period turns `NoP.qRs` into
  * `NoP..qRs`. So we compare alphanumerics only, and forgive a few character
  * errors — but only when one read is clearly a *truncation* of the other.
  *
