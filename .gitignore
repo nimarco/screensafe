@@ -3,6 +3,16 @@ dist
 .DS_Store
 *.log
 
+# Local environment files and assistant/editor metadata.
+.env
+.env.*
+!.env.example
+.claude/
+.codex/
+.agents/
+.cursor/
+.windsurf/
+
 # Verification artifacts written by tools/ during local testing.
 public/sample/export-check.mp4
 public/sample/verified-export.mp4
