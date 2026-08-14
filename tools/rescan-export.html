@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>re-scan exported file</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * Re-scans an already-exported file with the same detectors.
+       * Used to verify the demo flow: after allowing ONE finding through and
+       * keeping the rest blurred, the export should contain exactly the allowed
+       * value and nothing else.
+       */
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+      const name = new URLSearchParams(location.search).get('f') ?? 'demo-flow-export.mp4';
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/' + name)).blob();
+        const v = await loadVideo(new File([blob], name, { type: 'video/mp4' }));
+        say(`FILE ${name}  ${v.width}x${v.height} ${v.duration.toFixed(2)}s ${(blob.size/1e6).toFixed(2)}MB`);
+        const res = await scanVideo(v, { categories: CATS, sampleFps: 2 });
+        say(`\n${res.findings.length} finding(s) still detectable:`);
+        for (const f of res.findings) {
+          say(`  ${f.severity.padEnd(8)} ${f.label.padEnd(28)} ${f.start.toFixed(1)}-${f.end.toFixed(1)}s  ${f.masked}`);
+        }
+        say(`\nscan stats: ${res.stats.sampled} sampled, ${res.stats.analyzed} read, ${res.stats.skipped} skipped`);
+        window.__rescan = { n: res.findings.length, labels: res.findings.map((f) => f.label) };
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__rescan = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

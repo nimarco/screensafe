@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>export probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">loading…</div>
+    <script type="module">
+      // Exercises the export path in isolation with synthetic findings, so the
+      // encoder can be tested without paying for a full 45s scan first.
+      // Writes the result to public/sample/ so the output can be re-scanned.
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { exportRedacted } from '/src/lib/video/exportVideo.ts';
+
+      const out = document.getElementById('out');
+      const say = (s) => (out.textContent += s + '\n');
+
+      // Cover the terminal text region for the whole clip — crude on purpose;
+      // this probe is about the encoder, not the detectors.
+      const mkFinding = (id, start, end, box) => ({
+        id, detectorId: 'labeled-secret', label: 'test', category: 'developer',
+        severity: 'critical', value: 'x', masked: 'x',
+        start, end, occurrences: [{ t: start, box }, { t: end, box }],
+        redact: true, source: 'ocr', confidence: 1,
+      });
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const video = await loadVideo(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));
+        say(`source ${video.width}x${video.height} ${video.duration.toFixed(2)}s audio=${video.hasAudio}`);
+
+        const findings = [
+          mkFinding('a', 0, 22.1, { x: 30, y: 100, w: 700, h: 120 }),
+          mkFinding('b', 0, 22.1, { x: 230, y: 470, w: 600, h: 60 }),
+        ];
+
+        const t0 = performance.now();
+        let lastPct = -1;
+        const res = await exportRedacted(video, findings, {
+          fps: 30,
+          onProgress: (p) => {
+            window.__lastProgress = { ...p, at: Math.round(performance.now() - t0) };
+            const pct = Math.round((p.done / Math.max(1, p.total)) * 100);
+            if (p.phase === 'video' && pct !== lastPct && pct % 10 === 0) {
+              lastPct = pct;
+              say(`  ${p.phase} ${pct}% (${p.done}/${p.total}) t+${((performance.now()-t0)/1000).toFixed(1)}s`);
+            } else if (p.phase !== 'video') {
+              say(`  ${p.phase}: ${p.note ?? ''} t+${((performance.now()-t0)/1000).toFixed(1)}s`);
+            }
+          },
+        });
+
+        say(`\nEXPORT OK in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+        say(`  format=${res.format} ${res.width}x${res.height} @${res.fps}fps audio=${res.hasAudio}`);
+        say(`  bytes=${res.blob.size} (${(res.blob.size / 1e6).toFixed(2)} MB)`);
+
+        const buf = await res.blob.arrayBuffer();
+        const save = await fetch('/__save-sample?name=export-check.mp4', { method: 'POST', body: buf });
+        say(`  saved: ${JSON.stringify(await save.json())}`);
+
+        // Prove the bytes decode back to a real video.
+        const check = await loadVideo(new File([res.blob], 'export-check.mp4', { type: 'video/mp4' }));
+        say(`\nRE-DECODED ${check.width}x${check.height} ${check.duration.toFixed(2)}s`);
+        window.__exportDone = { ok: true };
+      } catch (e) {
+        say('\nFAILED: ' + (e?.stack ?? e));
+        window.__exportDone = { ok: false, error: String(e) };
+      }
+    </script>
+  </body>
+</html>

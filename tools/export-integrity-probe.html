@@ -1,0 +1,198 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>export integrity probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="holder" style="position:relative;width:1px;height:1px;overflow:hidden"></div>
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * Guards the one property the whole product rests on: an export that is
+       * handed back is fully redacted, and an export that lost frames is not
+       * handed back at all.
+       *
+       * The bug this was written for: the muxer was built with mp4-muxer's
+       * default `firstTimestampBehavior: 'strict'`, which THROWS if the first
+       * video chunk's timestamp isn't exactly 0. The throw happens inside the
+       * VideoEncoder's output callback, where nothing awaits it — so the chunk
+       * was silently dropped, the encoder was poisoned, and exportRedacted
+       * still returned a blob that the UI announced as "Export complete".
+       *
+       * A non-zero first timestamp is normal on the fast path: it takes
+       * timestamps from the source's own presentation times via
+       * requestVideoFrameCallback, and the first frame a video element
+       * presents is not reliably at 0.
+       *
+       * Part 1 reproduces that directly, both ways. Part 2 is the end-to-end
+       * regression: export the sample and re-scan the result with the real
+       * detectors.
+       *
+       * Part 3 deliberately disables requestVideoFrameCallback on the same
+       * scanned-and-mounted element. That forces the seek fallback used by a
+       * hidden tab in the app. On the vulnerable implementation, seekTo()
+       * yields once after seeked, composite() draws the still-decoded terminal
+       * frame for an early timestamp, and the re-scan reports the leaked AWS
+       * keys, bearer token, and public IP. The fixed implementation refuses
+       * this path because no presented-frame callback can prove which pixels
+       * drawImage() will receive.
+       */
+      import { ArrayBufferTarget, Muxer } from 'mp4-muxer';
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+      import { exportRedacted } from '/src/lib/video/exportVideo.ts';
+
+      const out = document.getElementById('out');
+      const holder = document.getElementById('holder');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+      const results = { mux: [], e2e: null, forcedFallback: null };
+
+      /* ---- part 1: does a non-zero first timestamp survive the muxer? ---- */
+      async function muxWithFirstTimestamp(behavior, firstT) {
+        const dropped = [];
+        const target = new ArrayBufferTarget();
+        const muxer = new Muxer({
+          target,
+          fastStart: 'in-memory',
+          firstTimestampBehavior: behavior,
+          video: { codec: 'avc', width: 320, height: 180 },
+        });
+        const enc = new VideoEncoder({
+          output: (chunk, meta) => {
+            try {
+              muxer.addVideoChunk(chunk, meta);
+            } catch (e) {
+              dropped.push(e.message.split('\n')[0]);
+            }
+          },
+          error: (e) => dropped.push('encoder: ' + e.message.split('\n')[0]),
+        });
+        enc.configure({ codec: 'avc1.42001f', width: 320, height: 180, bitrate: 1e6, framerate: 30 });
+
+        const cv = new OffscreenCanvas(320, 180);
+        const ctx = cv.getContext('2d');
+        for (let i = 0; i < 12; i++) {
+          ctx.fillStyle = `hsl(${i * 27} 70% 45%)`;
+          ctx.fillRect(0, 0, 320, 180);
+          const frame = new VideoFrame(cv, {
+            timestamp: Math.round((firstT + i / 30) * 1e6),
+            duration: Math.round(1e6 / 30),
+          });
+          try {
+            enc.encode(frame, { keyFrame: i === 0 });
+          } catch (e) {
+            dropped.push('encode: ' + e.message.split('\n')[0]);
+          }
+          frame.close();
+        }
+        let bytes = 0;
+        try {
+          await enc.flush();
+          enc.close();
+          muxer.finalize();
+          bytes = target.buffer.byteLength;
+        } catch (e) {
+          dropped.push('flush: ' + e.message.split('\n')[0]);
+        }
+        return { behavior, firstT, dropped, bytes };
+      }
+
+      try {
+        out.textContent = '';
+        say(`visibilityState=${document.visibilityState}\n`);
+        say('[1/3] muxing a track whose first frame sits at t=0.0417s');
+        say('      (what the rVFC fast path actually produces)\n');
+
+        for (const behavior of ['strict', 'cross-track-offset']) {
+          const r = await muxWithFirstTimestamp(behavior, 0.0417);
+          results.mux.push(r);
+          const verdict = r.dropped.length === 0 && r.bytes > 0 ? 'OK  ' : 'LOST';
+          say(`  ${verdict} firstTimestampBehavior: '${behavior}'`);
+          say(`       chunks lost: ${r.dropped.length}, file: ${r.bytes} bytes`);
+          if (r.dropped.length) say(`       ${r.dropped[0].slice(0, 96)}…`);
+        }
+
+        /* ---- part 2: end-to-end, under the review screen's conditions ---- */
+        say('\n[2/3] export the sample and re-scan the result\n');
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const file = new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' });
+
+        const source = await loadVideo(file);
+        const scan = await scanVideo(source, { categories: CATS, sampleFps: 2 });
+        say(`  source: ${scan.findings.length} findings`);
+
+        // Export from the SAME element that was just scanned, mounted the way
+        // the review screen mounts it. Exporting from a fresh element instead
+        // hides the bug this probe exists to catch.
+        const video = source;
+        video.el.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0;pointer-events:none';
+        holder.appendChild(video.el);
+
+        const t0 = performance.now();
+        const res = await exportRedacted(video, scan.findings, { fps: 30 });
+        say(`  export: ${res.blob.size} bytes in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+
+        const exported = await loadVideo(new File([res.blob], 'out.mp4', { type: 'video/mp4' }));
+        const after = await scanVideo(exported, { categories: CATS, sampleFps: 2 });
+        const verdict = after.findings.length === 0 ? 'PASS' : 'FAIL';
+        say(`  re-scan: ${after.findings.length} findings → ${verdict}`);
+        for (const f of after.findings) say(`    LEAKED ${f.label} ${f.start.toFixed(1)}s ${f.masked}`);
+        results.e2e = { before: scan.findings.length, after: after.findings.length, verdict };
+
+        /* ---- part 3: force the unsafe hidden-tab seek fallback --------- */
+        say('\n[3/3] force the hidden-tab seek fallback on the scanned element\n');
+        say('      disabling requestVideoFrameCallback is the deterministic equivalent\n');
+
+        const ownRvfc = Object.getOwnPropertyDescriptor(video.el, 'requestVideoFrameCallback');
+        Object.defineProperty(video.el, 'requestVideoFrameCallback', {
+          configurable: true,
+          value: undefined,
+        });
+
+        let forcedError = null;
+        let forcedAfter = null;
+        try {
+          const forced = await exportRedacted(video, scan.findings, { fps: 30 });
+          say(`  vulnerable fallback returned ${forced.blob.size} bytes`);
+          const forcedVideo = await loadVideo(new File([forced.blob], 'forced-fallback.mp4', { type: 'video/mp4' }));
+          forcedAfter = await scanVideo(forcedVideo, { categories: CATS, sampleFps: 2 });
+          say(`  fallback re-scan: ${forcedAfter.findings.length} findings`);
+          for (const f of forcedAfter.findings) {
+            say(`    ${f.label} ${f.start.toFixed(1)}s ${f.masked}`);
+          }
+        } catch (e) {
+          forcedError = String(e);
+          say(`  safe refusal: ${forcedError}`);
+        } finally {
+          if (ownRvfc) {
+            Object.defineProperty(video.el, 'requestVideoFrameCallback', ownRvfc);
+          } else {
+            delete video.el.requestVideoFrameCallback;
+          }
+        }
+
+        const forcedCount = forcedAfter?.findings.length ?? 0;
+        const fallbackVerdict = forcedError
+          ? 'PASS — unsafe fallback was refused'
+          : forcedCount === 0
+            ? 'PASS — fallback produced no detectable findings'
+            : `FAIL — stale-frame fallback leaked ${forcedCount} findings`;
+        say(`  ${fallbackVerdict}`);
+        results.forcedFallback = { after: forcedCount, refused: !!forcedError, error: forcedError };
+
+        video.el.remove();
+
+        say('\n' + '═'.repeat(60));
+        const muxFixed = results.mux.find((m) => m.behavior === 'cross-track-offset');
+        const fallbackSafe = !!forcedError || forcedCount === 0;
+        say(muxFixed.dropped.length === 0 && verdict === 'PASS' && fallbackSafe ? 'ALL GOOD' : 'PROBLEM — see above');
+        say('═'.repeat(60));
+      } catch (e) {
+        say('\nPROBE ERROR: ' + (e?.stack ?? e));
+        results.error = String(e);
+      }
+
+      window.__probe = results;
+      say('done.');
+    </script>
+  </body>
+</html>

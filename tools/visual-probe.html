@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>visual detector probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * Establishes whether the face and QR detectors are LIVE (initialise,
+       * execute per frame, return a well-formed result) as distinct from
+       * whether they have ever successfully detected their target. The demo
+       * recording contains neither a face nor a QR code, so a count of 0 here
+       * means "ran clean, nothing to find" — not "works".
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { initFaceDetector, detectFaces } from '/src/lib/vision/faces.ts';
+      import { detectQr } from '/src/lib/vision/qr.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const v = await loadVideo(new File([blob], 'd.mp4', { type: 'video/mp4' }));
+        const g = createGrabber(v.width, v.height);
+
+        const det = await initFaceDetector();
+        say(`initFaceDetector() -> ${det ? 'OK (non-null detector)' : 'NULL (unavailable)'}`);
+
+        let faceCalls = 0, faceHits = 0, faceErr = null;
+        let qrCalls = 0, qrHits = 0, qrErr = null;
+
+        for (const t of [1, 4, 8, 12, 16, 20]) {
+          await seekTo(v.el, t);
+          g.grab(v.el);
+          try { const f = detectFaces(g.canvas, v.width, v.height); faceCalls++; faceHits += f.length; }
+          catch (e) { faceErr = String(e); }
+          try { const q = detectQr(g.toImageData()); qrCalls++; qrHits += q.length; }
+          catch (e) { qrErr = String(e); }
+        }
+        say(`detectFaces: ${faceCalls}/6 frames executed without throwing, ${faceHits} faces found, err=${faceErr}`);
+        say(`detectQr   : ${qrCalls}/6 frames executed without throwing, ${qrHits} codes found, err=${qrErr}`);
+
+        // Synthetic sanity check for the QR *plumbing*: feed jsQR a canvas that
+        // is definitely not a QR code and confirm it returns [] rather than junk.
+        const c = document.createElement('canvas');
+        c.width = 200; c.height = 200;
+        const cx = c.getContext('2d');
+        cx.fillStyle = '#fff'; cx.fillRect(0, 0, 200, 200);
+        cx.fillStyle = '#000';
+        for (let i = 0; i < 40; i++) cx.fillRect(Math.random()*180, Math.random()*180, 12, 12);
+        say(`detectQr(noise) -> ${JSON.stringify(detectQr(cx.getImageData(0,0,200,200)))}`);
+
+        say('\nCONCLUSION');
+        say(`  face path live: ${det ? 'yes' : 'no'} | ever detected a real face in testing: NO (demo has none)`);
+        say(`  qr path live:   ${qrErr ? 'no' : 'yes'} | ever decoded a real QR in testing: NO (demo has none)`);
+        window.__visual = { det: !!det, faceCalls, faceHits, qrCalls, qrHits, faceErr, qrErr };
+      } catch (e) {
+        say('ERROR: ' + (e?.stack ?? e));
+        window.__visual = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

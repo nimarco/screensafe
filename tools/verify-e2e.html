@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>end-to-end verification</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * The claim ScreenSafe makes is "the secrets are gone from the exported
+       * pixels". This proves it the only way that counts: scan the source,
+       * export with the redactions applied, then run the *same detectors* over
+       * the exported file and assert they find nothing.
+       */
+      import { loadVideo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+      import { exportRedacted } from '/src/lib/video/exportVideo.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+      const t0 = performance.now();
+      const el = (s) => `t+${((performance.now() - t0) / 1000).toFixed(1)}s`;
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const source = await loadVideo(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));
+        say(`SOURCE  ${source.width}x${source.height} ${source.duration.toFixed(2)}s`);
+
+        say(`\n[1/3] scanning source…`);
+        const before = await scanVideo(source, { categories: CATS, sampleFps: 2 });
+        say(`  ${before.findings.length} findings ${el()}`);
+        for (const f of before.findings) {
+          say(`    ${f.severity.padEnd(8)} ${f.label.padEnd(28)} ${f.start.toFixed(1)}-${f.end.toFixed(1)}s  ${f.masked}`);
+        }
+
+        say(`\n[2/3] exporting with all redactions applied…`);
+        const res = await exportRedacted(source, before.findings, { fps: 30 });
+        say(`  ${res.format} ${res.width}x${res.height} @${res.fps}fps audio=${res.hasAudio} ${(res.blob.size/1e6).toFixed(2)}MB ${el()}`);
+        await fetch('/__save-sample?name=verified-export.mp4', { method: 'POST', body: await res.blob.arrayBuffer() });
+
+        say(`\n[3/3] re-scanning the EXPORTED file with the same detectors…`);
+        const exported = await loadVideo(new File([res.blob], 'out.mp4', { type: 'video/mp4' }));
+        const after = await scanVideo(exported, { categories: CATS, sampleFps: 2 });
+        say(`  ${after.findings.length} findings ${el()}`);
+        for (const f of after.findings) {
+          say(`    LEAKED: ${f.label} ${f.start.toFixed(1)}-${f.end.toFixed(1)}s ${f.masked}`);
+        }
+
+        const removed = before.findings.length - after.findings.length;
+        say('');
+        say('═'.repeat(64));
+        if (after.findings.length === 0) {
+          say(`PASS — ${before.findings.length} secrets in the source, 0 detectable in the export.`);
+        } else {
+          say(`FAIL — ${after.findings.length} of ${before.findings.length} still readable after export.`);
+        }
+        say('═'.repeat(64));
+        window.__verify = { before: before.findings.length, after: after.findings.length, removed };
+      } catch (e) {
+        say('\nERROR: ' + (e?.stack ?? e));
+        window.__verify = { error: String(e) };
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>ocr probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">loading…</div>
+    <script type="module">
+      // Dumps exactly what Tesseract reads from a given frame, plus which
+      // detectors fire on it. Used to tell OCR fidelity problems apart from
+      // detector-logic problems.
+      import { OcrPool } from '/src/lib/ocr/pool.ts';
+      import { buildLine, scanLine } from '/src/lib/detectors/scanText.ts';
+      import { ocrScaleFor, seekTo, createGrabber, loadVideo } from '/src/lib/video/frames.ts';
+      import { compare, meanLuma, signatureOf } from '/src/lib/video/diff.ts';
+
+      const out = document.getElementById('out');
+      const say = (s) => (out.textContent += s + '\n');
+      const ALL = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const video = await loadVideo(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));
+        const scale = ocrScaleFor(video.width, video.height);
+        say(`video ${video.width}x${video.height} dur=${video.duration.toFixed(2)} ocrScale=${scale.toFixed(2)}`);
+
+        const pool = new OcrPool();
+        await pool.init();
+        const full = createGrabber(video.width, video.height);
+        const shot = createGrabber(Math.round(video.width * scale), Math.round(video.height * scale));
+
+        for (const t of [18.5, 19.0, 19.5, 20.0, 20.5, 21.0]) {
+          await seekTo(video.el, t);
+          full.grab(video.el);
+          const dark = meanLuma(signatureOf(full.canvas)) < 110;
+          shot.ctx.filter = dark ? 'invert(1)' : 'none';
+          shot.ctx.drawImage(video.el, 0, 0, shot.width, shot.height);
+          shot.ctx.filter = 'none';
+          const sig = signatureOf(full.canvas);
+          const cmp = compare(window.__prevSig ?? null, sig);
+          window.__prevSig = sig;
+          const res = await pool.recognize(shot.canvas, scale);
+          say(
+            `\n══════ t=${t}s  (inverted=${dark})  ${res.lines.length} lines  ` +
+              `gate: changed=${cmp.changed} mean=${cmp.mean.toFixed(2)} cells=${cmp.cells}`,
+          );
+          for (const line of res.lines) {
+            const built = buildLine(line.words);
+            if (!built.text.trim()) continue;
+            const hits = scanLine(built.text, ALL);
+            say(`  "${built.text}"`);
+            if (hits.length) say(`     → ${hits.map((h) => `${h.detectorId}="${h.value}"`).join(', ')}`);
+          }
+        }
+        await pool.terminate();
+        say('\ndone');
+        window.__ocrDone = true;
+      } catch (e) {
+        say('FAILED: ' + (e?.stack ?? e));
+        window.__ocrDone = true;
+      }
+    </script>
+  </body>
+</html>

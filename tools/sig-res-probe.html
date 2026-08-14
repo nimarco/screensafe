@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>signature resolution probe</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre">
+    <div id="out">measuring…</div>
+    <script type="module">
+      // Picks the change-detection signature resolution. Compares a known real
+      // change (a line of text appears at 19.75s) against a known non-change,
+      // across candidate resolutions. We want a resolution where the real
+      // change clears the noise floor by a wide margin.
+      const CASES = [
+        ['REAL  19.5→20.0 (line appears)', 19.5, 20.0],
+        ['REAL  19.0→19.5 (line appears)', 19.0, 19.5],
+        ['REAL  18.5→19.0 (line appears)', 18.5, 19.0],
+        ['NONE  20.5→21.0 (static)', 20.5, 21.0],
+        ['NONE  21.0→21.5 (static)', 21.0, 21.5],
+      ];
+      const RES = [[64, 36], [96, 54], [128, 72], [160, 90], [240, 135], [320, 180]];
+
+      const v = document.createElement('video');
+      v.src = '/sample/leaky-demo.mp4';
+      v.muted = true;
+      v.preload = 'auto';
+      const out = document.getElementById('out');
+      const say = (s) => (out.textContent += s + '\n');
+
+      const seek = (t) => new Promise((r) => {
+        let done = false;
+        const fin = () => { if (done) return; done = true; setTimeout(r, 80); };
+        v.addEventListener('seeked', function h() { v.removeEventListener('seeked', h); fin(); });
+        setTimeout(fin, 1200);
+        v.currentTime = t;
+      });
+
+      function sigAt(w, h, twoStep) {
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const cx = c.getContext('2d', { willReadFrequently: true, alpha: false });
+        if (twoStep) {
+          // Downscale in halving steps so thin strokes are averaged in rather
+          // than point-sampled away.
+          let cw = v.videoWidth, ch = v.videoHeight;
+          let src = v;
+          while (cw / 2 > w) {
+            cw = Math.max(w, Math.round(cw / 2));
+            ch = Math.max(h, Math.round(ch / 2));
+            const tmp = document.createElement('canvas');
+            tmp.width = cw; tmp.height = ch;
+            tmp.getContext('2d', { alpha: false }).drawImage(src, 0, 0, cw, ch);
+            src = tmp;
+          }
+          cx.drawImage(src, 0, 0, w, h);
+        } else {
+          cx.drawImage(v, 0, 0, w, h);
+        }
+        const d = cx.getImageData(0, 0, w, h).data;
+        const s = new Uint8Array(w * h);
+        for (let i = 0, p = 0; i < d.length; i += 4, p++) s[p] = (d[i]*77 + d[i+1]*150 + d[i+2]*29) >> 8;
+        return s;
+      }
+
+      function diff(a, b) {
+        let sum = 0, c8 = 0, c12 = 0;
+        for (let i = 0; i < a.length; i++) {
+          const d = Math.abs(a[i] - b[i]);
+          sum += d; if (d > 8) c8++; if (d > 12) c12++;
+        }
+        return { mean: sum / a.length, c8, c12 };
+      }
+
+      if (v.readyState < 1) await new Promise((r) => v.addEventListener('loadedmetadata', r, { once: true }));
+      out.textContent = '';
+
+      for (const twoStep of [false, true]) {
+        say(`\n############ ${twoStep ? 'TWO-STEP (halving) downscale' : 'DIRECT downscale'}`);
+        say('case                              res        mean   >8   >12');
+        for (const [label, t0, t1] of CASES) {
+          for (const [w, h] of RES) {
+            await seek(t0);
+            const a = sigAt(w, h, twoStep);
+            await seek(t1);
+            const b = sigAt(w, h, twoStep);
+            const r = diff(a, b);
+            say(`${label.padEnd(33)} ${String(w + 'x' + h).padEnd(9)} ${r.mean.toFixed(2).padStart(6)} ${String(r.c8).padStart(4)} ${String(r.c12).padStart(5)}`);
+          }
+          say('');
+        }
+      }
+      say('done');
+      window.__resDone = true;
+    </script>
+  </body>
+</html>

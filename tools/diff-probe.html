@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>diff probe</title>
+  </head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:13px ui-monospace,Menlo,monospace;padding:20px">
+    <div id="out">measuring…</div>
+    <script type="module">
+      // Measures the real frame-to-frame signal in the demo recording so the
+      // change-detection thresholds are picked from data, not vibes.
+      const SIG_W = 64, SIG_H = 36;
+      const v = document.createElement('video');
+      v.src = '/sample/leaky-demo.mp4';
+      v.muted = true;
+      const c = document.createElement('canvas');
+      c.width = SIG_W; c.height = SIG_H;
+      const cx = c.getContext('2d', { willReadFrequently: true, alpha: false });
+
+      const sig = () => {
+        cx.drawImage(v, 0, 0, SIG_W, SIG_H);
+        const d = cx.getImageData(0, 0, SIG_W, SIG_H).data;
+        const s = new Uint8Array(SIG_W * SIG_H);
+        for (let i = 0, p = 0; i < d.length; i += 4, p++) s[p] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+        return s;
+      };
+
+      const seek = (t) => new Promise((r) => {
+        let done = false;
+        const fin = () => { if (done) return; done = true; setTimeout(r, 60); };
+        v.addEventListener('seeked', function h() { v.removeEventListener('seeked', h); fin(); });
+        setTimeout(fin, 1200); // seeking to the current position fires nothing
+        v.currentTime = t;
+      });
+
+      if (v.readyState < 1) await new Promise((r) => v.addEventListener('loadedmetadata', r, { once: true }));
+      const rows = [];
+      let prev = null;
+      for (let t = 0; t < 22; t += 0.5) {
+        await seek(t);
+        const s = sig();
+        if (prev) {
+          let sum = 0;
+          const buckets = { d4: 0, d8: 0, d12: 0, d20: 0 };
+          for (let i = 0; i < s.length; i++) {
+            const diff = Math.abs(s[i] - prev[i]);
+            sum += diff;
+            if (diff > 4) buckets.d4++;
+            if (diff > 8) buckets.d8++;
+            if (diff > 12) buckets.d12++;
+            if (diff > 20) buckets.d20++;
+          }
+          rows.push({ t: t.toFixed(1), mean: +(sum / s.length).toFixed(2), ...buckets });
+        }
+        prev = s;
+      }
+      window.__probe = rows;
+      document.getElementById('out').textContent =
+        't      mean   >4   >8  >12  >20\n' +
+        rows.map((r) => `${r.t.padStart(4)}  ${String(r.mean).padStart(6)}  ${String(r.d4).padStart(3)}  ${String(r.d8).padStart(3)}  ${String(r.d12).padStart(3)}  ${String(r.d20).padStart(3)}`).join('\n');
+    </script>
+  </body>
+</html>
