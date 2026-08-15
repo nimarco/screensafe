@@ -40,7 +40,7 @@ const MOSAIC_STRENGTH_LABEL = (cells: number): string =>
   cells <= 4
     ? 'maximum'
     : cells <= 6
-      ? 'faces unrecognisable'
+      ? 'defeats face detection'
       : cells <= 8
         ? 'strong'
         : cells <= 13
@@ -294,7 +294,7 @@ export function Findings({
               Export video
             </button>
             <p className="foot-note mono">
-              {redacted.length} of {findings.length} findings burned in · mosaic downsample, not a reversible blur
+              {redacted.length} of {findings.length} findings burned in · destructive mosaic, not a blur
             </p>
             {stats && (
               <p className="foot-note mono">

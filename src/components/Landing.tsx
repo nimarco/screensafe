@@ -40,9 +40,9 @@ export function Landing({ categories, onToggleCategory, onFile, onSample, loadin
       <div className="intro">
         <h1>Scan a screen recording for exposed secrets.</h1>
         <p>
-          OCR reads every frame that changed, {TOTAL_RULES} deterministic detectors classify what it finds, and
-          the export burns mosaics into the pixels. Decoding, detection and encoding all run in this tab — the
-          video is never uploaded.
+          The video is sampled at 2 fps, OCR reads the frames where something changed, {TOTAL_RULES}{' '}
+          deterministic detectors classify what it finds, and the export burns mosaics into the pixels.
+          Decoding, detection and encoding all run in this tab — the video is never uploaded.
         </p>
       </div>
 

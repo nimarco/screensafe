@@ -141,9 +141,12 @@ function scratch(dest: Ctx2D, w: number, h: number): { canvas: CanvasImageSource
  * export. Same code, opposite outcomes, because the strength was pinned to the
  * block instead of to what survives it.
  *
- * Six cells across is past the point where a human can identify a face, and it
- * is strictly stronger than the old rule for text, which was already verified
- * unreadable by re-scanning the exported pixels.
+ * At six cells across the face detector no longer re-identifies the face when
+ * re-run on the redacted pixels, and it is strictly stronger than the old rule
+ * for text, which was already verified unreadable by rescanning the export.
+ * Note what that evidence is and isn't: a detector failing to find a face is
+ * the strongest measurement available here, not proof that a human eye cannot
+ * identify it.
  */
 export const DEFAULT_MOSAIC_CELLS = 6;
 
@@ -185,9 +188,10 @@ export function mosaicGrid(
  * Destructive mosaic.
  *
  * We downsample the region to a handful of pixels and blow it back up with
- * smoothing disabled. Unlike a Gaussian blur — which is a reversible
- * convolution and has been undone on real redactions before — averaging pixels
- * down to blocks throws the information away for good.
+ * smoothing disabled. A Gaussian blur preserves far more of the region's
+ * spatial structure, and blurred content has been partially reconstructed
+ * before; averaging pixels down to blocks discards that structure rather than
+ * redistributing it.
  */
 export function paintRedactions(
   ctx: Ctx2D,
