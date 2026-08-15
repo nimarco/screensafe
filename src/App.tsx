@@ -9,6 +9,7 @@ import type { CategoryId, Finding } from './lib/types';
 import { exportRedacted, type ExportProgress, type ExportResult } from './lib/video/exportVideo';
 import { loadVideo, type LoadedVideo } from './lib/video/frames';
 import { DEFAULT_MOSAIC_CELLS } from './lib/video/redact';
+import { assetUrl } from './lib/util/assetUrl';
 import { disposeFaceDetector } from './lib/vision/faces';
 
 type Phase = 'idle' | 'scanning' | 'review';
@@ -177,7 +178,7 @@ export default function App() {
     setLoadingSample(true);
     setError(null);
     try {
-      const res = await fetch('/sample/leaky-demo.mp4');
+      const res = await fetch(assetUrl('sample/leaky-demo.mp4'));
       if (!res.ok) throw new Error('Sample recording is unavailable.');
       const blob = await res.blob();
       await start(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));

@@ -1,12 +1,13 @@
 import { createWorker, PSM, type Worker } from 'tesseract.js';
 import type { Box } from '../types';
 import type { OcrWord } from '../detectors/scanText';
+import { assetUrl } from '../util/assetUrl';
 
 /** Everything Tesseract needs is served from our own origin — no CDN calls. */
 const TESS_OPTS = {
-  workerPath: '/vendor/tess/worker.min.js',
-  corePath: '/vendor/tess/',
-  langPath: '/vendor/tess/',
+  workerPath: assetUrl('vendor/tess/worker.min.js'),
+  corePath: assetUrl('vendor/tess/'),
+  langPath: assetUrl('vendor/tess/'),
   gzip: false as const,
   cacheMethod: 'none' as const,
 };

@@ -1,5 +1,6 @@
 import type { Box } from '../types';
 import { tileRects } from './tiles';
+import { assetUrl } from '../util/assetUrl';
 
 export interface FaceHit {
   box: Box;
@@ -184,11 +185,11 @@ export async function initFaceDetector(minDetectionConfidence = 0.45): Promise<D
   initPromise = (async () => {
     try {
       const { FilesetResolver, FaceDetector } = await import('@mediapipe/tasks-vision');
-      const fileset = await FilesetResolver.forVisionTasks('/vendor/mediapipe/wasm');
+      const fileset = await FilesetResolver.forVisionTasks(assetUrl('vendor/mediapipe/wasm'));
       const make = (delegate: 'GPU' | 'CPU') =>
         FaceDetector.createFromOptions(fileset, {
           baseOptions: {
-            modelAssetPath: '/vendor/models/blaze_face_short_range.tflite',
+            modelAssetPath: assetUrl('vendor/models/blaze_face_short_range.tflite'),
             delegate,
           },
           runningMode: 'IMAGE',

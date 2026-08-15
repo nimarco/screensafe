@@ -38,7 +38,9 @@ function sampleWriter(): Plugin {
 
 export default defineConfig({
   plugins: [react(), sampleWriter()],
-  base: '/',
+  // Local development uses the root path; the Pages workflow sets this to
+  // /screensafe/ so built assets also work from the repository subpath.
+  base: process.env.VITE_BASE_PATH || '/',
   build: {
     target: 'es2022',
     chunkSizeWarningLimit: 3000,
