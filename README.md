@@ -21,6 +21,11 @@ server to upload it to.
 34 detectors · 5 categories · text + faces + QR · in MP4/WebM/MOV · out H.264 MP4 · 0 bytes off-device
 ```
 
+**[Try it now → nimarco.github.io/screensafe](https://nimarco.github.io/screensafe/)**
+· no install, no account, nothing to sign up for. Click **Load sample** and
+watch it scan. Your own files work too, and they never leave the tab either —
+the hosted build is the same static bundle, serving the same local models.
+
 Screen recordings are the strongest case, which is why the bundled sample is
 one: terminals, dashboards, editors, and browser tabs put high-value secrets on
 screen as crisp, legible text, often for a second or two. The pipeline itself
@@ -41,6 +46,9 @@ values are gone, and they're gone from the file, not hidden behind an overlay.
 ---
 
 ## Run it in 60 seconds
+
+The [hosted build](https://nimarco.github.io/screensafe/) needs nothing at all.
+To run it locally:
 
 ```bash
 npm install && npm run dev
