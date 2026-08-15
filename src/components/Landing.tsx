@@ -38,7 +38,7 @@ export function Landing({ categories, onToggleCategory, onFile, onSample, loadin
   return (
     <div className="work">
       <div className="intro">
-        <h1>Scan a screen recording for exposed secrets.</h1>
+        <h1>Scan a video for anything you didn't mean to publish.</h1>
         <p>
           The video is sampled at 2 fps, OCR reads the frames where something changed, {TOTAL_RULES}{' '}
           deterministic detectors classify what it finds, and the export burns mosaics into the pixels.
@@ -84,7 +84,7 @@ export function Landing({ categories, onToggleCategory, onFile, onSample, loadin
           <FileIcon />
         </span>
         <div className="dz-text">
-          <h2>Drop a screen recording</h2>
+          <h2>Drop a video</h2>
           <p>MP4, WebM or MOV · best under 5 minutes · read straight off disk</p>
         </div>
         <input

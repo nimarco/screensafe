@@ -2,15 +2,17 @@
 
 **The privacy linter for video.**
 
-Screen recordings leak in a way that's easy to miss. A Stripe key sits in your
-terminal for a second and a half at 0:47 while you tab between windows. You
-don't catch it on playback, nobody reviewing it catches it either, and the key
-stays live in every copy of that video.
+Video leaks more than people expect, and usually for only a moment. An API key
+sits in a terminal for a second and a half at 0:47 while you tab between
+windows. A customer's email is on screen while you demo a dashboard. Somebody
+walks through the background of a shot. A QR code stays in frame long enough to
+scan. None of it survives playback review, and all of it ships in every copy of
+the video.
 
-ScreenSafe is the check you run before publishing. Drop in a screen recording.
-It samples the video, analyzes the frames where something changed, and finds
-secrets, personal data, faces, and QR codes. You review what it found, and it
-gives you back an MP4 with the exposures destroyed in the pixels.
+ScreenSafe is the check you run before publishing. Drop in a video. It samples
+the footage, analyzes the frames where something changed, and finds sensitive
+text, faces, and QR codes. You review each finding, and it hands back an MP4
+with the redactions you approved burned into the pixels.
 
 All of it runs in your browser. The video is never uploaded, because there's no
 server to upload it to.
@@ -19,7 +21,13 @@ server to upload it to.
 34 detectors · 5 categories · text + faces + QR · in MP4/WebM/MOV · out H.264 MP4 · 0 bytes off-device
 ```
 
-One frame of the bundled sample, at 0:20. What the scan finds:
+Screen recordings are the strongest case, which is why the bundled sample is
+one: terminals, dashboards, editors, and browser tabs put high-value secrets on
+screen as crisp, legible text, often for a second or two. The pipeline itself
+isn't tied to them — faces and QR codes are found in any footage, and so is any
+text the OCR can read.
+
+One frame of that sample, at 0:20. What the scan finds:
 
 ![Four detections on a terminal frame: an AWS access key ID, an AWS secret access key, a JWT bearer token inside a curl command, and a public IP address](docs/detected.png)
 
@@ -277,17 +285,24 @@ Worth stating plainly, since a privacy tool that oversells its coverage is
 actively dangerous:
 
 - English OCR only.
-- Sampling runs at 2 fps, so content on screen for under about 500 ms can fall
+- Text detection wants legible, roughly upright text. That is the normal case
+  for anything rendered on a screen and the hard case for text out in the
+  world, so **license plates, street signs, and street addresses are out of
+  scope**, along with bare usernames and arbitrary personal names. Faces and QR
+  codes carry no such assumption.
+- Sampling runs at 2 fps, so content visible for under about 500 ms can fall
   between samples. Change detection and the forced 5-second re-read narrow
   this, but don't close it.
+- Change detection is what makes a screen recording cheap to scan: 21 of the
+  sample's 45 frames are skipped because nothing moved. Handheld or camera
+  footage changes on every frame, so the gate rarely fires and the scan costs
+  proportionally more.
 - Faces need roughly 64 px of head height at default settings.
 - Photographed screens get rotation correction. Strong perspective distortion
   still costs recall.
 - QR codes sitting closer together than one tile can still collide and defeat
   the sweep. The suite covers where that boundary is.
 - Private keys are matched at the `BEGIN … PRIVATE KEY` header line.
-- Out of scope: license plates, street addresses, street signs, bare usernames,
-  arbitrary personal names.
 - Long or high-resolution recordings take proportionally longer.
 
 Watch the exported file before you publish. That's the last human check, and
@@ -327,6 +342,6 @@ interface, the redaction and export path, the test suite, and the verification
 harnesses. Third-party libraries are listed above.
 
 Built for the [Social Media Automation Hackathon](https://social-media-automation-hacks.devpost.com/).
-Publishing a screen recording currently ends with someone scrubbing a timeline
-hoping they catch everything. This automates that pass, and then checks its own
-work.
+Publishing a video usually ends with someone scrubbing the timeline hoping they
+didn't leave anything on screen. This automates that privacy pass, and then
+verifies the exported result.

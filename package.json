@@ -1,7 +1,7 @@
 {
   "name": "screensafe",
   "version": "1.0.0",
-  "description": "The privacy linter for video. Finds and blurs secrets in screen recordings, entirely in your browser.",
+  "description": "The privacy linter for video. Finds secrets, personal data, faces and QR codes in a video and exports a redacted copy, entirely in your browser.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
