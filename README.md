@@ -1,209 +1,332 @@
 # ScreenSafe
 
-**The privacy linter for video.** ScreenSafe is the last privacy check before a
-creator publishes a screen recording. It finds secrets, personal data, faces,
-and QR codes on-device, lets the creator review each finding, and exports a
-redacted video.
+**The privacy linter for video.**
 
-Everything runs in the browser. The video is never uploaded.
+Screen recordings leak in a way that's easy to miss. A Stripe key sits in your
+terminal for a second and a half at 0:47 while you tab between windows. You
+don't catch it on playback, nobody reviewing it catches it either, and the key
+stays live in every copy of that video.
 
-**Author:** Marco Ni · [@nimarco](https://github.com/nimarco) · solo project
+ScreenSafe is the check you run before publishing. Drop in a screen recording.
+It samples the video, analyzes the frames where something changed, and finds
+secrets, personal data, faces, and QR codes. You review what it found, and it
+gives you back an MP4 with the exposures destroyed in the pixels.
 
-## Quick start
+All of it runs in your browser. The video is never uploaded, because there's no
+server to upload it to.
 
-```bash
-npm install
-npm run dev
+```
+34 detectors · 5 categories · text + faces + QR · in MP4/WebM/MOV · out H.264 MP4 · 0 bytes off-device
 ```
 
-Open [http://localhost:5173](http://localhost:5173) and click **Load sample**.
+One frame of the bundled sample, at 0:20. What the scan finds:
 
-## Why it scores against the rubric
+![Four detections on a terminal frame: an AWS access key ID, an AWS secret access key, a JWT bearer token inside a curl command, and a public IP address](docs/detected.png)
 
-| Judging lens | What the judge can verify |
-| --- | --- |
-| **Functionality · 30%** | Load a real video, find 13 grouped exposures, review them, export a playable MP4, and rescan the export to prove the redactions held. |
-| **Creativity · 20%** | A privacy linter built for the creator workflow: it treats a moving timeline of UI text as something to lint, not something a creator must scrub manually. |
-| **Technical execution · 20%** | Change-gated sampling, parallel OCR, OCR repair, face tiling, QR validation, temporal tracking, masked review, and destructive pixel-level export—all running locally. |
-| **Real-world usefulness · 30%** | It catches the exact leaks creators publish by accident—keys, tokens, emails, phones, cards, database URLs, faces, and QR codes—before the upload happens. |
+The same frame, decoded back out of the exported MP4:
 
-**Live-output bonus:** the challenge rewards projects that run in front of the
-judge and produce a real result. ScreenSafe's demo path ends with a playable,
-downloadable, rescanned redacted video—not a mockup or a pre-recorded claim.
+![The same terminal frame after export, with each detected value replaced by a coarse mosaic while the surrounding command text stays readable](docs/redacted.png)
 
-## The product
+The command, the `200 OK`, and the word `deployed to` all survive. Only the
+values are gone, and they're gone from the file, not hidden behind an overlay.
 
-ScreenSafe automates a publishing workflow that creators currently handle by
-scrubbing through a timeline manually:
+---
 
-1. **Scan** the recording at 2 fps and skip frames that have not changed.
-2. **Detect** sensitive text with OCR, validators, faces, and QR codes.
-3. **Review** grouped findings in one queue, with sensitive values masked.
-4. **Decide** per finding: keep the default redaction or allow it through.
-5. **Export** a destructive mosaic-redacted video.
-6. **Verify** the exported file with the same detection pipeline.
+## Run it in 60 seconds
 
-This is a working tool, not an annotated screenshot: the output is a real
-encoded video that can be played, scrubbed, and downloaded.
+```bash
+npm install && npm run dev
+```
 
-## Judge the demo
+Open <http://localhost:5173> and click **Load sample**. Everything needed is in
+the repo: the 22-second demo recording, the OCR data, the face model, the
+encoder. No API keys or accounts, and nothing is fetched at runtime.
 
-The bundled 22-second sample shows the complete loop:
+What happens, in order:
 
-1. Start the app and click **Load sample**.
-2. Wait for the scan to finish. The sample produces 13 grouped findings.
-3. In **Findings**, keep credentials and other sensitive values blurred.
-   Click **Allow** on the safe email example to demonstrate selective review.
-4. Adjust **Redaction strength** to show the face-safety tradeoff. The measured
-   face-safe setting is 6 mosaic cells per side.
-5. Click **Export**, wait for the result to replace the preview, and scrub it.
-6. Click **Download redacted video**.
+1. **Scan.** A few seconds. The counter shows 45 frames sampled, 24 actually
+   read, 21 skipped because nothing on screen had changed. (The production
+   build does this in about 2.5s. The dev server is slower.)
+2. **Review.** 13 findings on the reference run. Each one is grouped across the
+   time range it was visible, and each value is masked in the UI so the review
+   queue isn't a second leak. Everything is blurred by default.
+3. **Click a finding.** The video seeks to it and the box lights up.
+4. **Click Allow on the email.** One finding released, the rest still covered.
+   That's the point of having a review step: you decide, not the tool.
+5. **Drag Redaction strength.** The mosaic coarsens. 6 cells per side is the
+   tested floor for faces, and the UI says so.
+6. **Export.** The preview is replaced by the actual exported file, decoded
+   back from its own bytes. Scrub it. The redactions are in the pixels.
+7. **Download redacted video.** A real H.264/AAC MP4 you can upload anywhere.
 
-For a deeper browser check, open
-[tools/verify-e2e.html](tools/verify-e2e.html) while the dev server is running.
-It scans, exports, decodes the output, and rescans it to confirm that only
-explicitly allowed content remains.
+![The ScreenSafe review screen: on the left a video preview at 0:20 showing four live mosaic redactions and a findings timeline, on the right a scrollable queue of 13 grouped findings with severity, detector name, masked value, confidence, and per-finding Blur and Allow buttons](docs/review.png)
 
-For the optional 2–4 minute demo video, record this same sequence live: load
-the sample, show the grouped findings, allow the safe email, keep the sensitive
-findings covered, export, scrub the resulting MP4, and run the rescan proof.
+That's the review screen mid-decision. Values are masked in the queue, the
+preview shows exactly what the export will burn in, and the footer reports the
+scan that produced it.
 
-## Why this matters
+Then the part worth your time. With the dev server still running, open:
 
-Screen recordings expose a different class of privacy problem than ordinary
-video. The sensitive thing is often text inside a terminal, editor, billing
-page, or dashboard: an API key, token, email, phone number, card number, or
-database URL.
+<http://localhost:5173/tools/verify-e2e.html>
 
-ScreenSafe is designed for the creator workflow in the
-[Social Media Automation Hackathon](https://social-media-automation-hacks.devpost.com/):
-it automates the final safety pass before content is published, keeps the
-creator in control of the review, and produces a usable export.
+This scans the sample, exports it with every finding redacted, then decodes the
+exported file and runs the whole detector pipeline again over the output. It
+prints:
 
-## Detection coverage
+```
+PASS — 13 secrets in the source, 0 detectable in the export.
+```
 
-| Category | Coverage |
-| --- | --- |
-| Developer secrets | Stripe, GitHub, AWS access credentials, Google, OpenAI, Anthropic, Slack, SendGrid, npm, Twilio, JWTs, private-key headers, SSH keys, bearer tokens, passwords, and values assigned to secret-shaped names |
-| Personal data | Email addresses, North American and international phone numbers, and US Social Security numbers |
-| Financial data | Payment cards with Luhn validation and IBANs |
-| Infrastructure | Database connection strings, credentialed URLs, public and private IPs, internal hostnames, and AWS account IDs |
-| Visual content | Faces detected with MediaPipe BlazeFace and QR codes detected with jsQR |
+The Stripe key, the connection string, the SendGrid and OpenAI keys, the card,
+both AWS credentials, the bearer token, the emails, the phone numbers, the IP.
+None of them survive, because they're no longer in the file. I'd rather show
+that than assert it.
 
-There are 32 text detectors and 2 visual detectors in the production pipeline.
-Findings are assigned a severity, grouped across time, and blurred by default.
+> Keep that tab in the foreground while it runs. Exports refuse to start from a
+> hidden tab (see [Failing closed](#failing-closed) below), and that's the one
+> reliable way to make the harness report an error.
+
+---
+
+## What it catches
+
+| Category | Rules | Coverage |
+| --- | ---: | --- |
+| **Developer secrets** | 20 | Stripe (secret + publishable), GitHub, AWS access keys and secrets, Google, OpenAI, Anthropic, Slack tokens and webhooks, SendGrid, npm, Twilio, JWTs, `BEGIN … PRIVATE KEY` headers, SSH public keys, bearer tokens, password assignments, and any value assigned to a secret-shaped name |
+| **Personal information** | 4 | Emails, North American and international phone numbers, US SSNs |
+| **Financial** | 2 | Payment cards (Luhn-validated) and IBANs |
+| **Infrastructure** | 6 | Database connection strings, URLs with embedded credentials, public and private IPv4, internal hostnames, AWS account IDs |
+| **Visual identifiers** | 2 | Faces (MediaPipe BlazeFace) and QR codes (jsQR) |
+
+Every rule is a pattern plus a validator, so you can read it and know what it
+does. A card number has to pass Luhn. A JWT has to decode. An IBAN has to
+checksum. Categories can be switched off before the scan if you don't want them.
+
+---
 
 ## How it works
 
 ```
-video
-  -> 2 fps sampling and change detection
-  -> OCR workers plus face and QR detection
-  -> validators and severity classification
-  -> tracked findings with padded boxes
-  -> review queue
-  -> mosaic burn-in and encoded export
+  video file (never leaves the tab)
+        │
+        ├─▶ sample at 2 fps ──▶ perceptual signature ──▶ unchanged? skip it
+        │                                                  (forced re-read every 5s)
+        ▼
+  changed frame
+        │
+        ├─▶ dark frame? invert it        ─┐
+        ├─▶ photographed screen? deskew  ─┤──▶ OCR across 4 Web Workers
+        │                                 ┘
+        ├─▶ MediaPipe BlazeFace, full frame + native-resolution tiles
+        └─▶ jsQR, full frame + tiled sweep
+        │
+        ▼
+  32 text rules + validators ──▶ severity ──▶ boxes
+        │
+        ▼
+  temporal tracking: one finding per thing, with a time range
+   · duplicate merge   (partial read + full read of the same secret → one row)
+   · face stitching    (a head turn shouldn't become two rows)
+   · QR corroboration  (a weak read must appear twice to be believed)
+        │
+        ▼
+  review queue — masked values, blurred by default, allow one at a time
+        │
+        ▼
+  re-encode with mosaics burned in ──▶ H.264/AAC MP4
 ```
 
-Important implementation choices:
+### Failing closed
 
-- OCR runs in parallel Web Workers. Dark editor footage is inverted before
-  recognition, and photographed screens receive a measured deskew pass.
-- Text is classified with readable, deterministic rules and validators. OCR
-  spacing and split-token artifacts are repaired before matching.
-- Faces are detected over the full frame and native-resolution tiles so small
-  faces remain visible to the detector.
-- QR reads are validated for payload quality and geometry, then corroborated
-  across frames. A tiled sweep handles multiple codes in one frame.
-- Repeated observations become one finding with a time range instead of a
-  duplicate row for every sampled frame.
+A privacy tool that fails quietly is worse than no tool at all, because you
+ship anyway and you feel fine about it. So:
 
-## Review and export
+- Findings are redacted by default. You opt secrets *out*, never in.
+- If OCR fails on any frame, the scan throws. It won't hand back a short list
+  that you'd reasonably read as "all clear."
+- If a single frame fails to encode, there's no file. A partial export can be a
+  video with a hole where the covered frame should have been, and you'd
+  download it thinking it was safe.
+- If the tab is hidden, the export refuses to run. A backgrounded tab will
+  report a `currentTime` it isn't actually presenting, so the compositor can
+  hand the encoder a stale frame. There's no safe way to time around that, so
+  it stops rather than guess.
+- Findings are padded outward, by a full sample interval in time and past the
+  OCR box in space. Over-blurring is recoverable. A leak isn't.
 
-The review queue shows the detector source, severity, confidence, timestamp,
-occurrence count, masked value, and redaction state. Reviewers can allow or
-blur one finding at a time, or apply a bulk decision.
+### Mosaic, not blur
 
-Redaction is a destructive mosaic written into the output pixels. It is not a
-visual overlay that can be removed from the exported file. Chrome's demonstrated
-path produces H.264/AAC MP4; a MediaRecorder/WebM path is also available when
-the browser cannot provide the preferred encoder.
+Gaussian blur preserves a lot of the spatial structure of what it covers, and
+under favorable conditions blurred content can be partially reconstructed or
+inferred. Mosaic averages a region down to a handful of pixels and scales it
+back up with smoothing off, which throws that structure away instead of
+spreading it around. ScreenSafe uses the mosaic.
 
-## Privacy model
+The strength control is a cell count rather than a pixel size, which sounds
+like a detail and wasn't. Under the old fixed-block rule the number of
+surviving cells grew with the size of the region: a line of text got 33×2 cells
+and was destroyed, while a 446×485 face got 35×38 and stayed clearly
+recognizable in the export. Re-running the face detector over those redacted
+pixels found the face again at 0.89 confidence. Pinning the count fixes both
+ends. At 6 cells across, the detector no longer re-identifies the face in our
+tests, and it's strictly stronger than the old rule ever was for text.
 
-- Video processing is local to the browser.
-- OCR, face detection, QR detection, and encoding use vendored assets in
-  public/vendor.
-- No account, upload service, database, or external runtime API is required.
-- Sensitive values are masked before they appear in the review UI.
-- The bundled demo credentials are fabricated.
+### Other things that turned out to be hard
 
-## Verified result
+**Frame streaming beats seeking by about 20×.** Keyframes sit two seconds
+apart, so seeking to each of 660 frames re-decodes up to 60 frames every time.
+That's roughly 20,000 decodes for a 22-second clip. Playing the video and
+catching frames through `requestVideoFrameCallback` decodes each one once, with
+its real presentation time. A watchdog falls back to confirmed seeking if the
+stream stalls, and no frame is composited without a callback proving the
+decoder actually presented that moment.
 
-The current repository has a reproducible end-to-end result:
+**Face tracks used to get hijacked.** Association let a match move `3× its size
++ 40px` between samples, which is reasonable for scrolling text and about
+1400px for a head-sized box. Any face-shaped blob in the frame would join the
+nearest real face's track and inherit its confidence. A 0.53 box over a chair
+rode along on a 0.97 face and became a second redaction the reviewer couldn't
+dismiss on its own. Faces are now held to their own size, so an impostor has to
+stand alone and answer for its own score.
 
-- the bundled sample scans in about 2.5 seconds on the development machine;
-- 45 frames are sampled, 24 are read, and 21 are skipped as unchanged;
-- Chrome exports the redacted result as H.264/AAC MP4;
-- rescanning the exported file leaves only the email that was deliberately
-  allowed through;
-- npm test passes 131 deterministic regression checks covering detectors,
-  OCR normalization, masking, face tiling and tracking, QR validation,
-  redaction geometry, and export behavior;
-- npm run build completes the production build.
+**A face that never once clears 0.7 isn't a face.** Within a single frame, a
+doubtful box sitting next to a confident one gets dropped, which handles hands
+and chair backs. But a recording with no people in it has nothing confident to
+compare against, so a lone 0.48 blob survives. The synthetic demo is a code
+editor with no humans in it and it produced two "Face" findings, at 46% and
+48%. Judging the track as a whole fixes that (real faces measure 0.72 to 0.94)
+and it keeps the weak frames of a real face covered, since the track as a whole
+earned it.
 
-The detailed measurements and evidence are in
-[CAPABILITY-REPORT.md](CAPABILITY-REPORT.md).
+**Dark mode breaks OCR.** Tesseract is trained on dark text on light paper, and
+the footage this tool exists for is terminals and editors. Frames get inverted
+before recognition when mean luma says they're dark. The brightness comes free
+from the change-detection signature computed a moment earlier.
 
-## Development
+**Photographed screens.** When someone points a phone at a monitor, the
+whole-frame read isn't just worse, it's empty. A measured deskew pass took a
+simulated phone photo of an `.env` file from 0 of 6 secrets recognized to 6 of
+6. Ordinary screen recordings measure 0.02–0.10° of skew and stay on the fast
+path.
+
+**jsQR returns one code per call, and two codes return none.** Measured: a
+frame holding two QR codes decodes to nothing at all, in every arrangement
+tried, because the locator pairs finder patterns across both codes and every
+candidate quad fails. So each decoded region is painted out and the image is
+re-scanned, and the frame is also swept in overlapping tiles. Rejections get
+painted out too, or the locator latches onto the same shape forever.
+
+**The muxer threw inside an encoder callback.** `mp4-muxer` rejects a non-zero
+first timestamp by default, and the first frame a video element presents isn't
+reliably at exactly 0. The throw landed inside `VideoEncoder`'s output callback
+where nothing awaited it, so the frame vanished, the encoder was poisoned, and
+the export sailed on to report success over a file with holes in it.
+
+---
+
+## Verify it yourself
 
 ```bash
-npm install
-npm run dev
-npm test
+npm test     # 131 deterministic checks, no network, nothing to download
 npm run build
 ```
 
-The browser verification harnesses in [tools](tools) cover the end-to-end
-workflow, photographed-screen OCR, change detection, face scale, QR behavior,
-and export geometry.
+The suite covers detector positives, false-positive traps, OCR normalization
+(punctuation spacing, split tokens, confusable characters), value masking, face
+tiling and track association, QR validation, mosaic geometry bounds, and export
+helpers. The QR fixtures include real payloads, multiple codes in one frame, and
+false positives captured from actual video: checkerboards, window grids,
+barcodes, and dithered gradients that a naive detector reports as codes.
+
+Besides `verify-e2e.html`, [tools/](tools) has the browser harnesses behind
+every number above:
+
+| Harness | What it measures |
+| --- | --- |
+| `verify-e2e.html` | scan → export → decode → **rescan the output** |
+| `photo-scan-e2e.html`, `deskew-angle-probe.html` | photographed-screen recovery |
+| `vlog-bench.html`, `face-scale-bench.html` | face recall across 359 sampled frames of real webcam footage (99–100% on frames containing a face) |
+| `face-stray-probe.html` | false faces on people-free recordings |
+| `mosaic-probe.html`, `export-integrity-probe.html` | redaction strength and export geometry |
+| `diff-probe.html`, `gate-diagnosis.html` | change-detection gating |
+
+[CAPABILITY-REPORT.md](CAPABILITY-REPORT.md) records the measured numbers.
+
+---
+
+## Privacy model
+
+Decoding, OCR, face detection, QR detection, redaction, and encoding all happen
+in the tab. There's no backend, no database, no account, no external API.
+
+The OCR data, face model, and encoder are vendored in `public/vendor` (46 MB,
+committed) and served same-origin, so a scan makes no third-party request. That
+includes no CDN fetch for the models, which is the usual quiet leak in
+browser-ML demos.
+
+Matched values are masked before they reach the review UI, so the queue itself
+never shows a working secret. The bundled sample uses fabricated credentials.
+The app deploys as static files, and nothing about the hosting arrangement can
+see your video.
+
+---
+
+## Limits
+
+Worth stating plainly, since a privacy tool that oversells its coverage is
+actively dangerous:
+
+- English OCR only.
+- Sampling runs at 2 fps, so content on screen for under about 500 ms can fall
+  between samples. Change detection and the forced 5-second re-read narrow
+  this, but don't close it.
+- Faces need roughly 64 px of head height at default settings.
+- Photographed screens get rotation correction. Strong perspective distortion
+  still costs recall.
+- QR codes sitting closer together than one tile can still collide and defeat
+  the sweep. The suite covers where that boundary is.
+- Private keys are matched at the `BEGIN … PRIVATE KEY` header line.
+- Out of scope: license plates, street addresses, street signs, bare usernames,
+  arbitrary personal names.
+- Long or high-resolution recordings take proportionally longer.
+
+Watch the exported file before you publish. That's the last human check, and
+ScreenSafe is built to make it fast rather than to replace it.
+
+---
 
 ## Project layout
 
 ```
 src/
-  components/       landing, scan progress, preview, and review queue
-  lib/detectors/    detector catalog, matching, and validators
-  lib/ocr/          worker pool and photographed-screen preprocessing
-  lib/vision/       face and QR detection
-  lib/video/        sampling, change detection, mosaic, and export
-  scan.ts           sampling, gating, tracking, and deduplication
-scripts/             deterministic detector and fixture checks
-tools/               browser calibration and verification harnesses
-public/vendor/       local OCR, face, QR, and encoder assets
+  components/         landing, scan progress, preview stage, review queue
+  lib/scan.ts         sampling, change gating, tracking, dedupe, QR corroboration
+  lib/detectors/      rule catalog, line matching, validators, similarity
+  lib/ocr/            worker pool, dark inversion, deskew rebuild
+  lib/vision/         face detection, QR detection, tiling
+  lib/video/          frame grabbing, change signatures, mosaic, export
+scripts/              131 deterministic checks + fixtures
+tools/                browser measurement and verification harnesses
+public/vendor/        OCR data, BlazeFace model, encoder assets — all local
+public/sample/        the 22-second demo recording
 ```
-
-## Operating boundaries
-
-- English OCR is the supported language.
-- Scanning samples at 2 fps; content visible for less than roughly 500 ms can
-  fall between samples.
-- Photographed screens are deskewed for rotation. Strong perspective
-  distortion can reduce OCR recall.
-- The practical face floor is about 64 pixels of head height with the default
-  scan settings.
-- Very small, blurred, or tightly clustered QR codes can fall below the
-  detector's geometry and corroboration thresholds.
-- Private-key detection covers the BEGIN ... PRIVATE KEY header line.
-- License plates, street addresses, street signs, bare usernames, and
-  arbitrary names are outside the current detection scope.
-- Long or high-resolution recordings require more processing time.
-
-Review the findings and watch the exported file before publishing.
 
 ## Built with
 
-React, TypeScript, Vite, Tesseract.js, MediaPipe Tasks Vision, jsQR,
-mp4-muxer, WebCodecs, and MediaRecorder.
+React 19, TypeScript, Vite, Tesseract.js, MediaPipe Tasks Vision, jsQR,
+mp4-muxer, WebCodecs, and MediaRecorder. Chrome is the demonstrated path
+(WebCodecs into H.264/AAC MP4). Browsers without WebCodecs fall back to
+MediaRecorder and get WebM.
 
-The app deploys as static files with no backend or database.
+## Credits
+
+**Marco Ni** ([@nimarco](https://github.com/nimarco)), solo project. I wrote the
+application logic: the detection rules and validators, the OCR and
+preprocessing pipeline, face and QR detection, temporal tracking, the review
+interface, the redaction and export path, the test suite, and the verification
+harnesses. Third-party libraries are listed above.
+
+Built for the [Social Media Automation Hackathon](https://social-media-automation-hacks.devpost.com/).
+Publishing a screen recording currently ends with someone scrubbing a timeline
+hoping they catch everything. This automates that pass, and then checks its own
+work.

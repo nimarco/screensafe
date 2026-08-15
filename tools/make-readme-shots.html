@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>readme shots</title></head>
+  <body style="background:#0b0d13;color:#e6e9ef;font:12px ui-monospace,Menlo,monospace;padding:20px;white-space:pre-wrap">
+    <div id="out">running…</div>
+    <script type="module">
+      /*
+       * Renders the before/after frame pair used in the README, straight from
+       * the real pipeline: a real scan supplies the boxes, and the "after"
+       * frame goes through the same paintRedactions the exporter uses. Nothing
+       * here is illustrative — if the mosaic in the README looks weak, the
+       * export is weak.
+       */
+      import { loadVideo, createGrabber, seekTo } from '/src/lib/video/frames.ts';
+      import { scanVideo } from '/src/lib/scan.ts';
+      import { activeBoxes, paintRedactions, paintOutlines, DEFAULT_MOSAIC_CELLS } from '/src/lib/video/redact.ts';
+
+      const out = document.getElementById('out');
+      const say = (s = '') => (out.textContent += s + '\n');
+      const CATS = new Set(['developer', 'personal', 'financial', 'network', 'visual']);
+
+      // createGrabber hands back an OffscreenCanvas where one exists, so the
+      // encode call is convertToBlob rather than the callback-style toBlob.
+      const toPng = (canvas) =>
+        typeof canvas.convertToBlob === 'function'
+          ? canvas.convertToBlob({ type: 'image/png' })
+          : new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+
+      const save = async (canvas, name) => {
+        const blob = await toPng(canvas);
+        const res = await fetch(`/__save-sample?name=${name}`, { method: 'POST', body: await blob.arrayBuffer() });
+        const json = await res.json();
+        say(`  saved ${name} (${(json.bytes / 1e3).toFixed(0)} KB)`);
+      };
+
+      // The sample is a 720p terminal with content only in the top third, so
+      // the README images are cropped to it rather than shipping 450px of
+      // empty background.
+      const CROP_H = 270;
+      const cropTop = (src, w, h) => {
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        c.getContext('2d').drawImage(src, 0, 0, w, h, 0, 0, w, h);
+        return c;
+      };
+
+      try {
+        out.textContent = '';
+        const blob = await (await fetch('/sample/leaky-demo.mp4')).blob();
+        const source = await loadVideo(new File([blob], 'leaky-demo.mp4', { type: 'video/mp4' }));
+        say(`SOURCE ${source.width}x${source.height} ${source.duration.toFixed(2)}s`);
+
+        say(`scanning…`);
+        const { findings } = await scanVideo(source, { categories: CATS, sampleFps: 2 });
+        say(`${findings.length} findings\n`);
+
+        // Candidate moments, chosen for how many findings are live at once.
+        const stops = [3.0, 4.5, 13.5, 20.0, 21.0];
+
+        for (const t of stops) {
+          const live = findings.filter((f) => t >= f.start && t <= f.end);
+          say(`t=${t.toFixed(1)}s — ${live.length} live: ${live.map((f) => f.label).join(', ')}`);
+
+          // Same seek path the scanner uses. The strict export seek needs a
+          // visible document; this harness runs headless like the scan does.
+          await seekTo(source.el, t);
+          await new Promise((r) => setTimeout(r, 120));
+          const g = createGrabber(source.width, source.height);
+
+          const crop = (name) => save(cropTop(g.canvas, source.width, CROP_H), name);
+
+          g.ctx.drawImage(source.el, 0, 0, source.width, source.height);
+          await crop(`shot-${t.toFixed(1)}-before.png`);
+
+          const boxes = activeBoxes(findings, t, source.width, source.height);
+          paintOutlines(g.ctx, boxes, '#ff5f56');
+          await crop(`shot-${t.toFixed(1)}-found.png`);
+
+          g.ctx.drawImage(source.el, 0, 0, source.width, source.height);
+          paintRedactions(g.ctx, boxes, source.width, source.height, DEFAULT_MOSAIC_CELLS);
+          await crop(`shot-${t.toFixed(1)}-after.png`);
+        }
+
+        say(`\nDONE`);
+        window.__shotsDone = { ok: true };
+      } catch (err) {
+        say('FAILED: ' + (err?.message ?? err));
+        window.__shotsDone = { ok: false, error: String(err) };
+      }
+    </script>
+  </body>
+</html>
