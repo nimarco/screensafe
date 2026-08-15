@@ -1,6 +1,7 @@
 import type { Box } from '../types';
 import { tileRects } from './tiles';
 import { assetUrl } from '../util/assetUrl';
+import { blockMediaPipeMetrics } from '../util/blockMediaPipeMetrics';
 
 export interface FaceHit {
   box: Box;
@@ -172,6 +173,7 @@ type Source = HTMLCanvasElement | OffscreenCanvas | ImageBitmap;
 let detector: Detector | null = null;
 let initPromise: Promise<Detector | null> | null = null;
 let detectorGeneration = 0;
+let releaseMetricsGuard: (() => void) | null = null;
 
 /**
  * MediaPipe BlazeFace, loaded from our own origin. Returns null (rather than
@@ -182,6 +184,7 @@ let detectorGeneration = 0;
 export async function initFaceDetector(minDetectionConfidence = 0.45): Promise<Detector | null> {
   if (initPromise) return initPromise;
   const generation = detectorGeneration;
+  const releaseMetrics = blockMediaPipeMetrics();
   initPromise = (async () => {
     try {
       const { FilesetResolver, FaceDetector } = await import('@mediapipe/tasks-vision');
@@ -211,12 +214,15 @@ export async function initFaceDetector(minDetectionConfidence = 0.45): Promise<D
         } catch {
           /* noop */
         }
+        releaseMetrics();
         return null;
       }
       detector = created;
+      releaseMetricsGuard = releaseMetrics;
       return detector;
     } catch (err) {
       console.warn('[screensafe] face detection unavailable:', err);
+      releaseMetrics();
       if (generation === detectorGeneration) initPromise = null;
       return null;
     }
@@ -388,6 +394,8 @@ export function disposeFaceDetector(): void {
   } catch {
     /* noop */
   }
+  releaseMetricsGuard?.();
+  releaseMetricsGuard = null;
   detector = null;
   initPromise = null;
   scratch = null;
